@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Product Sourcing Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css" rel="stylesheet">
+    <style>
+        .gate-badge { font-size: 0.75rem; padding: 0.25rem 0.5rem; }
+        .gate-passed { background-color: #d4edda; color: #155724; }
+        .gate-failed { background-color: #f8d7da; color: #721c24; }
+        .margin-green { color: #198754; font-weight: bold; }
+        .margin-orange { color: #fd7e14; font-weight: bold; }
+        .margin-red { color: #dc3545; font-weight: bold; }
+        .score-badge { font-size: 1.2rem; padding: 0.5rem 1rem; }
+        .table th { position: sticky; top: 0; background: #f8f9fa; z-index: 10; }
+        .card-hover:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.1); transform: translateY(-2px); transition: all 0.2s; }
+    </style>
+</head>
+<body class="bg-light">
+    <nav class="navbar navbar-dark bg-primary mb-4">
+        <div class="container-fluid">
+            <span class="navbar-brand mb-0 h1">
+                <i class="bi bi-box-seam"></i> Product Sourcing Dashboard
+            </span>
+            <div class="d-flex gap-3">
+                <span class="badge bg-success fs-6">{{ stats.passed_all }} / {{ stats.total }} 全通过</span>
+                <span class="badge bg-warning text-dark fs-6">{{ stats.pending_review }} 待审核</span>
+                <span class="badge bg-info fs-6">{{ stats.approved }} 已通过</span>
+                <a href="/api/candidates" target="_blank" class="btn btn-outline-light btn-sm">API JSON</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container-fluid px-4">
+        <div class="row g-3 mb-4">
+            <div class="col-12 col-md-6 col-lg-4">
+                <div class="card stats-card border-0 shadow-sm">
+                    <div class="card-body text-center">
+                        <h3 class="text-primary">{{ stats.total }}</h3>
+                        <p class="mb-0 text-muted">总候选数</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-12 col-md-6 col-lg-4">
+                <div class="card stats-card border-0 shadow-sm">
+                    <div class="card-body text-center">
+                        <h3 class="text-success">{{ stats.passed_all }}</h3>
+                        <p class="mb-0 text-muted">9门槛全通过</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-12 col-md-6 col-lg-4">
+                <div class="card stats-card border-0 shadow-sm">
+                    <div class="card-body text-center">
+                        <h3 class="text-warning">{{ stats.pending_review }}</h3>
+                        <p class="mb-0 text-muted">待人工审核</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card shadow-sm">
+            <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">候选品列表 (按得分 & 通过门槛数排序)</h5>
+                <small class="text-muted">点击行查看详情</small>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0 align-middle">
+                        <thead class="table-light">
+                            <tr>
+                                <th style="width: 50px;">#</th>
+                                <th style="width: 80px;">ID</th>
+                                <th>产品标题</th>
+                                <th style="width: 120px;">品类</th>
+                                <th style="width: 80px;">得分</th>
+                                <th style="width: 100px;">通过/总门槛</th>
+                                <th style="width: 100px;">毛利率</th>
+                                <th style="width: 100px;">重量/尺寸</th>
+                                <th style="width: 100px;">竞品验证</th>
+                                <th style="width: 100px;">状态</th>
+                                <th style="width: 120px;">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for item in candidates %}
+                            <tr class="card-hover" onclick="window.location='/candidate/{{ item.candidate.id }}'" style="cursor: pointer;">
+                                <td>{{ loop.index }}</td>
+                                <td><code>{{ item.candidate.id }}</code></td>
+                                <td>
+                                    <strong>{{ item.candidate.title[:60] }}{% if item.candidate.title|length > 60 %}...{% endif %}</strong>
+                                    <br><small class="text-muted">{{ item.candidate.niche }}</small>
+                                </td>
+                                <td>{{ item.candidate.niche }}</td>
+                                <td>
+                                    <span class="badge score-badge {% if item.candidate.total_score == 100 %}bg-success{% else %}bg-danger{% endif %}">
+                                        {{ item.candidate.total_score }}
+                                    </span>
+                                </td>
+                                <td>
+                                    <span class="badge {% if item.passed_count == item.total_gates %}bg-success{% else %}bg-warning text-dark{% endif %}">
+                                        {{ item.passed_count }} / {{ item.total_gates }}
+                                    </span>
+                                </td>
+                                <td>
+                                    <span class="margin-{{ item.margin_color }}">
+                                        {{ item.candidate.estimated_margin_pct }}%
+                                    </span>
+                                    <br><small class="text-muted">零售 ${{ item.candidate.estimated_retail_price_usd }}</small>
+                                </td>
+                                <td>
+                                    {{ item.candidate.weight_g|round(0) }}g
+                                    <br><small>{{ item.candidate.dimensions_cm[0]|round(0) }}×{{ item.candidate.dimensions_cm[1]|round(0) }}×{{ item.candidate.dimensions_cm[2]|round(0) }}cm</small>
+                                </td>
+                                <td>
+                                    销量 {{ item.candidate.competitor_sales_90d }}
+                                    <br>评论 {{ item.candidate.competitor_reviews }}
+                                </td>
+                                <td>
+                                    <span class="badge 
+                                        {% if item.candidate.review_status == 'approved' %}bg-success
+                                        {% elif item.candidate.review_status == 'rejected' %}bg-danger
+                                        {% elif item.candidate.review_status == 'waived' %}bg-info
+                                        {% else %}bg-secondary{% endif %}">
+                                        {{ item.candidate.review_status }}
+                                    </span>
+                                </td>
+                                <td>
+                                    <a href="/candidate/{{ item.candidate.id }}" class="btn btn-sm btn-outline-primary">详情</a>
+                                    {% if item.candidate.review_status == 'pending' %}
+                                    <form action="/candidate/{{ item.candidate.id }}/review" method="post" class="d-inline ms-1" onsubmit="event.stopPropagation();">
+                                        <input type="hidden" name="status" value="approved">
+                                        <button type="submit" class="btn btn-sm btn-success" onclick="event.stopPropagation(); return confirm('确认通过？')">通过</button>
+                                    </form>
+                                    <form action="/candidate/{{ item.candidate.id }}/review" method="post" class="d-inline ms-1" onsubmit="event.stopPropagation();">
+                                        <input type="hidden" name="status" value="rejected">
+                                        <button type="submit" class="btn btn-sm btn-danger" onclick="event.stopPropagation(); return confirm('确认拒绝？')">拒绝</button>
+                                    </form>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

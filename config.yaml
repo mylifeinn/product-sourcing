@@ -1,0 +1,141 @@
+# Product Sourcing Pipeline Configuration
+# All thresholds from Round 2 Q11 (Hard Gates)
+
+pipeline:
+  # Fetch settings
+  fetch:
+    max_candidates_per_niche: 20
+    request_timeout: 30
+    rate_limit_delay: 2  # seconds between requests
+  
+  # Scoring thresholds (Hard Gates - all must pass)
+  scoring:
+    gate_1_pain_point_keywords:
+      min_longtail_keywords: 3
+      min_monthly_search: 500
+      max_keyword_difficulty: 30
+    
+    gate_2_trend:
+      google_trends_90d_yoy_min_pct: 20
+      tiktok_hashtag_7d_growth_min_pct: 50
+    
+    gate_3_margin:
+      min_gross_margin_pct: 45  # (retail - wholesale - shipping - fees) / retail
+    
+    gate_4_lightweight:
+      max_weight_g: 500
+      max_dimensions_cm: [30, 20, 10]  # L, W, H
+      allowed_shipping_channels: ["ePacket", "4PX", "YunExpress"]
+    
+    gate_5_quality:
+      min_supplier_rating: 4.7
+      max_refund_rate_pct: 3
+      requires_actual_photos: true
+    
+    gate_6_uniqueness:
+      check_platforms: ["amazon", "temu", "shein"]
+      max_matching_pages: 3  # first 3 pages no exact match
+    
+    gate_7_seasonality:
+      evergreen_max_fluctuation_pct: 30
+      seasonal_min_peak_window_days: 90
+      seasonal_prep_lead_time_days: 60
+    
+    gate_8_market_proof:
+      min_competitor_sales_90d: 50
+      min_competitor_reviews: 200
+    
+    gate_9_customer_value:
+      min_aov_usd: 60
+      max_repurchase_cycle_days: 90
+      min_ltv_orders: 3
+  
+  # Pricing model
+  pricing:
+    wholesale_to_retail_multiplier: 3.5
+    shipping_cost_buffer_pct: 15  # add 15% on top of carrier quote
+    platform_fee_pct: 2.9  # Shopify Payments
+    fixed_fee_usd: 0.30
+  
+  # Deduplication
+  dedup:
+    similarity_threshold: 0.85  # on niche + pain_point_keywords
+  
+  # Compliance
+  compliance:
+    patent_keywords: ["title", "niche", "pain_point_keywords"]
+    trademark_keywords: ["title", "brand"]
+    cache_ttl_days: 30
+  
+  # Healthcheck thresholds (T+7, T+14, T+30)
+  healthcheck:
+    thresholds:
+      sessions:
+        t7: 50
+        t14: 150
+        t30: 400
+      add_to_cart_rate_pct:
+        t7: 3.0
+        t14: 4.0
+        t30: 5.0
+      checkout_rate_pct:
+        t7: 1.0
+        t14: 1.5
+        t30: 2.0
+      cvr_pct:
+        t7: 0.5
+        t14: 1.0
+        t30: 1.5
+      return_rate_pct:
+        t7: 10.0
+        t14: 8.0
+        t30: 5.0
+      min_aov_usd:
+        t14: 60
+        t30: 60
+      min_ltv_orders:
+        t30: 1.5
+
+# External API settings (fill via .env)
+apis:
+  ahrefs:
+    base_url: "https://api.ahrefs.com/v3"
+  shopify:
+    api_version: "2024-10"
+  notion:
+    api_version: "2022-06-28"
+  google_patents:
+    base_url: "https://patents.googleapis.com/v1"
+  uspto:
+    base_url: "https://api.uspto.gov"
+  tmview:
+    base_url: "https://www.tmdn.org/tmview/api"
+  keepa:
+    base_url: "https://api.keepa.com"
+    domain: 1  # 1=US, 2=UK, 3=DE, etc.
+  rainforest:
+    base_url: "https://api.rainforestapi.com"
+  dataforseo:
+    base_url: "https://api.dataforseo.com/v3"
+
+# Keepa settings
+keepa:
+  api_key: ""  # Set via .env KEEPA_API_KEY
+  daily_token_limit: 100
+  domain: 1  # 1=US
+
+# Wholesale search settings
+wholesale:
+  aliexpress_enabled: true
+  alibaba_enabled: true
+  max_offers_per_niche: 10
+  request_timeout: 45
+
+# Seed niches (will be populated from Q21)
+seed_niches: []
+
+# Brand config for SEO template (from Q22)
+brand:
+  voice: ""
+  usp_framework: ""
+  trust_anchors: ""

@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: product-sourcing
+    ports:
+      - "8085:8085"
+    environment:
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./config.yaml:/app/config.yaml:ro
+      - ./templates:/app/templates:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # 可选：定时任务容器（用 cron 触发 CLI）
+  # cron:
+  #   build: .
+  #   container_name: product-sourcing-cron
+  #   env_file:
+  #     - .env
+  #   volumes:
+  #     - ./data:/app/data
+  #     - ./config.yaml:/app/config.yaml:ro
+  #   entrypoint: >
+  #     /bin/sh -c "
+  #       echo '0 2 * * * cd /app && uv run python -m sourcing fetch \"portable neck massager\" --source real --limit 10' > /etc/crontab &&
+  #       echo '0 4 * * * cd /app && uv run python -m sourcing healthcheck --days 30' >> /etc/crontab &&
+  #       cron -f
+  #     "
+  #   restart: unless-stopped

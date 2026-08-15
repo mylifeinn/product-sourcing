@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ candidate.title }} - 详情</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css" rel="stylesheet">
+    <style>
+        .gate-card { transition: all 0.2s; }
+        .gate-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        .gate-passed { border-left: 4px solid #198754; }
+        .gate-failed { border-left: 4px solid #dc3545; }
+    </style>
+</head>
+<body class="bg-light">
+    <nav class="navbar navbar-dark bg-primary mb-4">
+        <div class="container-fluid">
+            <a href="/" class="btn btn-outline-light btn-sm me-3">
+                <i class="bi bi-arrow-left"></i> 返回列表
+            </a>
+            <span class="navbar-brand mb-0 h1">{{ candidate.title[:50] }}{% if candidate.title|length > 50 %}...{% endif %}</span>
+            <span class="badge {% if candidate.review_status == 'approved' %}bg-success{% elif candidate.review_status == 'rejected' %}bg-danger{% elif candidate.review_status == 'waived' %}bg-info{% else %}bg-secondary{% endif %} fs-6 ms-3">
+                {{ candidate.review_status }}
+            </span>
+        </div>
+    </nav>
+
+    <div class="container-fluid px-4">
+        <div class="row g-4 mb-4">
+            <!-- Basic Info -->
+            <div class="col-12 col-lg-4">
+                <div class="card shadow-sm h-100">
+                    <div class="card-header bg-white"><h5 class="mb-0">基本信息</h5></div>
+                    <div class="card-body">
+                        <table class="table table-sm mb-0">
+                            <tr><th style="width: 120px;">ID</th><td><code>{{ candidate.id }}</code></td></tr>
+                            <tr><th>品类</th><td>{{ candidate.niche }}</td></tr>
+                            <tr><th>总分</th><td><span class="badge {% if candidate.total_score == 100 %}bg-success{% else %}bg-danger{% endif %} fs-6">{{ candidate.total_score }}</span></td></tr>
+                            <tr><th>通过门槛</th><td>{{ passed_count }} / {{ total_gates }}</td></tr>
+                            <tr><th>建议零售价</th><td><strong>${{ candidate.estimated_retail_price_usd }}</strong></td></tr>
+                            <tr><th>估算批发价</th><td>${{ candidate.wholesale_price_usd }}</td></tr>
+                            <tr><th class="margin-{{ 'green' if candidate.estimated_margin_pct >= 45 else 'orange' if candidate.estimated_margin_pct >= 30 else 'red' }}">毛利率</th>
+                                <td class="margin-{{ 'green' if candidate.estimated_margin_pct >= 45 else 'orange' if candidate.estimated_margin_pct >= 30 else 'red' }} fw-bold">{{ candidate.estimated_margin_pct }}%</td></tr>
+                            <tr><th>运费估算</th><td>${{ candidate.estimated_shipping_usd }}</td></tr>
+                            <tr><th>物流渠道</th><td>{{ candidate.shipping_channel }}</td></tr>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Physical Specs -->
+            <div class="col-12 col-lg-4">
+                <div class="card shadow-sm h-100">
+                    <div class="card-header bg-white"><h5 class="mb-0">物理规格</h5></div>
+                    <div class="card-body">
+                        <table class="table table-sm mb-0">
+                            <tr><th style="width: 120px;">重量</th><td>{{ candidate.weight_g }} g</td></tr>
+                            <tr><th>尺寸</th><td>{{ candidate.dimensions_cm[0] }} × {{ candidate.dimensions_cm[1] }} × {{ candidate.dimensions_cm[2] }} cm</td></tr>
+                            <tr><th>供应商评分</th><td>{{ candidate.supplier_rating }}/5.0</td></tr>
+                            <tr><th>退款率</th><td>{{ candidate.refund_rate_pct }}%</td></tr>
+                            <tr><th>实拍图</th><td>{% if candidate.has_actual_photos %}<i class="bi bi-check-circle text-success"></i> 有{% else %}<i class="bi bi-x-circle text-danger"></i> 无{% endif %}</td></tr>
+                            <tr><th>供应商链接</th><td><a href="{{ candidate.supplier_url }}" target="_blank" class="text-truncate d-block" style="max-width: 200px;">{{ candidate.supplier_url }}</a></td></tr>
+                            <tr><th>联系人</th><td>{{ candidate.supplier_contact }}</td></tr>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Market & Value -->
+            <div class="col-12 col-lg-4">
+                <div class="card shadow-sm h-100">
+                    <div class="card-header bg-white"><h5 class="mb-0">市场 & 客户价值</h5></div>
+                    <div class="card-body">
+                        <table class="table table-sm mb-0">
+                            <tr><th style="width: 150px;">Google Trends YoY</th><td>{{ candidate.google_trends_yoy_pct }}%</td></tr>
+                            <tr><th>TikTok 代理增长</th><td>{{ candidate.tiktok_hashtag_growth_pct }}%</td></tr>
+                            <tr><th>竞品90天销量</th><td>{{ candidate.competitor_sales_90d }}</td></tr>
+                            <tr><th>竞品评论数</th><td>{{ candidate.competitor_reviews }}</td></tr>
+                            <tr><th>预估 AOV</th><td>${{ candidate.estimated_aov_usd }}</td></tr>
+                            <tr><th>复购周期</th><td>{{ candidate.estimated_repurchase_cycle_days }} 天</td></tr>
+                            <tr><th>预估 LTV</th><td>{{ candidate.estimated_ltv_orders }} 单</td></tr>
+                            <tr><th>长青/季节</th><td>{% if candidate.is_evergreen %}长青{% else %}季节性 (旺季 {{ candidate.seasonal_peak_window_days }}天){% endif %}</td></tr>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Gates Detail -->
+        <div class="row g-3 mb-4">
+            <div class="col-12">
+                <div class="card shadow-sm">
+                    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="bi bi-shield-check"></i> 9 道硬门槛详细结果</h5>
+                        <span class="badge {% if passed_count == total_gates %}bg-success{% else %}bg-warning text-dark{% endif %} fs-6">
+                            {{ passed_count }} / {{ total_gates }} 通过
+                        </span>
+                    </div>
+                    <div class="card-body">
+                        <div class="row g-3">
+                            {% for gate in gates %}
+                            <div class="col-12 col-md-6 col-lg-4">
+                                <div class="card gate-card h-100 {% if gate.passed %}gate-passed{% else %}gate-failed{% endif %}">
+                                    <div class="card-body">
+                                        <div class="d-flex justify-content-between align-items-start mb-2">
+                                            <h6 class="mb-0">{{ gate.label }}</h6>
+                                            <span class="badge {% if gate.passed %}bg-success{% else %}bg-danger{% endif %}">
+                                                {% if gate.passed %}<i class="bi bi-check"></i> 通过{% else %}<i class="bi bi-x"></i> 失败{% endif %}
+                                            </span>
+                                        </div>
+                                        <p class="text-muted small mb-0">{{ gate.detail }}</p>
+                                    </div>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Cost Estimate -->
+        {% if cost_est %}
+        <div class="row g-3 mb-4">
+            <div class="col-12">
+                <div class="card shadow-sm border-info">
+                    <div class="card-header bg-info text-white"><h5 class="mb-0"><i class="bi bi-calculator"></i> 成本反推详情 (基于竞品零售价)</h5></div>
+                    <div class="card-body">
+                        <div class="row g-3">
+                            <div class="col-md-3"><strong>竞品零售价</strong><br>${{ cost_est.competitor_retail_price_usd }} ({{ cost_est.competitor_source }})</div>
+                            <div class="col-md-3"><strong>批发价区间</strong><br>${{ cost_est.estimated_wholesale_usd_min }} - ${{ cost_est.estimated_wholesale_usd_max }} (¥{{ cost_est.estimated_wholesale_cny_min }} - ¥{{ cost_est.estimated_wholesale_cny_max }})</div>
+                            <div class="col-md-3"><strong>建议零售价</strong><br>${{ cost_est.suggested_retail_usd_min }} - ${{ cost_est.suggested_retail_usd_max }}</div>
+                            <div class="col-md-3"><strong>毛利率区间</strong><br>{{ cost_est.gross_margin_pct_min }}% - {{ cost_est.gross_margin_pct_max }}%</div>
+                            <div class="col-md-3"><strong>物流成本</strong><br>${{ cost_est.estimated_shipping_usd }}</div>
+                            <div class="col-md-3"><strong>置信度</strong><br><span class="badge {% if cost_est.confidence == 'high' %}bg-success{% elif cost_est.confidence == 'medium' %}bg-warning text-dark{% else %}bg-danger{% endif %}">{{ cost_est.confidence }}</span></div>
+                            <div class="col-12"><strong>备注</strong><br><small class="text-muted">{{ cost_est.notes }}</small></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Keywords -->
+        <div class="row g-3 mb-4">
+            <div class="col-12">
+                <div class="card shadow-sm">
+                    <div class="card-header bg-white"><h5 class="mb-0"><i class="bi bi-tags"></i> 痛点长尾关键词 (前20)</h5></div>
+                    <div class="card-body">
+                        {% if candidate.longtail_keywords %}
+                        <div class="d-flex flex-wrap gap-2">
+                            {% for kw in candidate.longtail_keywords[:20] %}
+                            <span class="badge bg-light text-dark border">{{ kw.keyword }} <small class="text-muted">(Vol: {{ kw.volume }}, KD: {{ kw.kd }})</small></span>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <p class="text-muted mb-0">暂无关键词数据</p>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Competitor URLs -->
+        {% if candidate.market_proof_urls %}
+        <div class="row g-3 mb-4">
+            <div class="col-12">
+                <div class="card shadow-sm">
+                    <div class="card-header bg-white"><h5 class="mb-0"><i class="bi bi-link-45deg"></i> 竞品验证链接</h5></div>
+                    <div class="card-body">
+                        <ul class="list-unstyled mb-0">
+                            {% for url in candidate.market_proof_urls %}
+                            <li><a href="{{ url }}" target="_blank" class="text-truncate d-block" style="max-width: 600px;">{{ url }}</a></li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Compliance -->
+        <div class="row g-3 mb-4">
+            <div class="col-12 col-md-6">
+                <div class="card shadow-sm {% if candidate.patent_risk_level == 'high' %}border-danger{% elif candidate.patent_risk_level == 'low' %}border-warning{% else %}border-success{% endif %}">
+                    <div class="card-header bg-white"><h5 class="mb-0"><i class="bi bi-patent"></i> 专利风险</h5></div>
+                    <div class="card-body">
+                        <span class="badge {% if candidate.patent_risk_level == 'high' %}bg-danger{% elif candidate.patent_risk_level == 'low' %}bg-warning text-dark{% else %}bg-success{% endif %} fs-6">
+                            {{ candidate.patent_risk_level }}
+                        </span>
+                        {% if candidate.matched_patents %}
+                        <ul class="mt-2 mb-0 small">
+                            {% for p in candidate.matched_patents[:5] %}
+                            <li>{{ p }}</li>
+                            {% endfor %}
+                        </ul>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            <div class="col-12 col-md-6">
+                <div class="card shadow-sm {% if candidate.trademark_risk_level == 'high' %}border-danger{% elif candidate.trademark_risk_level == 'low' %}border-warning{% else %}border-success{% endif %}">
+                    <div class="card-header bg-white"><h5 class="mb-0"><i class="bi bi-shield-lock"></i> 商标风险</h5></div>
+                    <div class="card-body">
+                        <span class="badge {% if candidate.trademark_risk_level == 'high' %}bg-danger{% elif candidate.trademark_risk_level == 'low' %}bg-warning text-dark{% else %}bg-success{% endif %} fs-6">
+                            {{ candidate.trademark_risk_level }}
+                        </span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Review Actions -->
+        {% if candidate.review_status == 'pending' %}
+        <div class="row g-3 mb-4">
+            <div class="col-12">
+                <div class="card shadow-sm border-warning">
+                    <div class="card-header bg-white"><h5 class="mb-0"><i class="bi bi-clipboard-check"></i> 审核操作</h5></div>
+                    <div class="card-body">
+                        <form action="/candidate/{{ candidate.id }}/review" method="post" class="d-inline me-2">
+                            <input type="hidden" name="status" value="approved">
+                            <button type="submit" class="btn btn-success" onclick="return confirm('确认通过该候选品？')"><i class="bi bi-check"></i> 通过</button>
+                        </form>
+                        <form action="/candidate/{{ candidate.id }}/review" method="post" class="d-inline me-2">
+                            <input type="hidden" name="status" value="rejected">
+                            <button type="submit" class="btn btn-danger" onclick="return confirm('确认拒绝该候选品？')"><i class="bi bi-x"></i> 拒绝</button>
+                        </form>
+                        <form action="/candidate/{{ candidate.id }}/review" method="post" class="d-inline me-2">
+                            <input type="hidden" name="status" value="waived">
+                            <button type="submit" class="btn btn-info" onclick="return confirm('确认豁免通过？(不满足门槛但人工强行通过)')"><i class="bi bi-shield-exclamation"></i> 豁免通过</button>
+                        </form>
+                        <form action="/candidate/{{ candidate.id }}/review" method="post" class="d-inline">
+                            <input type="hidden" name="status" value="pending">
+                            <button type="submit" class="btn btn-secondary"><i class="bi bi-arrow-clockwise"></i> 重置待审</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

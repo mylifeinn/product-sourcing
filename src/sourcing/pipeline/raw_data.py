@@ -1,0 +1,38 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+
+@dataclass
+class RawProductData:
+    """Raw data fetched from various sources before normalization"""
+    title: str
+    niche: str
+    source: str  # "1688", "tiktok", "competitor", "manual", "public", "real"
+    source_url: str
+    wholesale_price_cny: float = 0.0
+    weight_g: float = 0.0
+    dimensions_cm: tuple[float, float, float] = (0, 0, 0)
+    supplier_rating: float = 0.0
+    refund_rate_pct: float = 0.0
+    has_actual_photos: bool = False
+    supplier_contact: str = ""
+    # Keyword data
+    longtail_keywords: List[dict] = field(default_factory=list)
+    google_trends_yoy_pct: float = 0.0
+    tiktok_hashtag_growth_pct: float = 0.0
+    # Competitor data
+    competitor_sales_90d: int = 0
+    competitor_reviews: int = 0
+    competitor_urls: List[str] = field(default_factory=list)
+    # Seasonality
+    is_evergreen: bool = True
+    seasonal_peak_window_days: int = 0
+    prep_lead_time_days: int = 0
+    # Customer value estimates
+    estimated_aov_usd: float = 0.0
+    estimated_repurchase_cycle_days: int = 0
+    estimated_ltv_orders: float = 0.0
+    # Cost estimate (for public fetcher)
+    cost_estimate: Optional[object] = None

@@ -1,0 +1,78 @@
+{% raw %}
+<div class="product-description">
+  <!-- Problem → Agitation → Solution -->
+  <section class="pas-framework">
+    <h2>{{ title }}</h2>
+    <p><strong>Problem:</strong> 你是否正在为 {{ pain_points | join("、") }} 而烦恼？</p>
+    <p><strong>Agitation:</strong> 传统方案要么笨重、要么无效、要么价格虚高，让你在 {{ niche }} 的选择上反复踩坑。</p>
+    <p><strong>Solution:</strong> {{ title }} —— 专为解决 {{ pain_points[0] if pain_points else "核心痛点" }} 而设计，{{ usp_framework }}。</p>
+  </section>
+
+  <!-- Specs Table with Schema.org Product markup -->
+  <section class="specs" itemscope itemtype="https://schema.org/Product">
+    <h3>产品规格</h3>
+    <table>
+      <thead>
+        <tr><th>参数</th><th>详情</th></tr>
+      </thead>
+      <tbody>
+        <tr><td itemprop="name">产品名称</td><td>{{ title }}</td></tr>
+        <tr><td>品类</td><td>{{ niche }}</td></tr>
+        <tr><td>重量</td><td>{{ specs.weight_g }}g</td></tr>
+        <tr><td>尺寸</td><td>{{ specs.dimensions_cm[0] }}×{{ specs.dimensions_cm[1] }}×{{ specs.dimensions_cm[2] }} cm</td></tr>
+        <tr><td>材质</td><td>{{ specs.material }}</td></tr>
+        <tr><td>品牌</td><td itemprop="brand">{{ brand_voice }}</td></tr>
+      </tbody>
+    </table>
+    
+    <meta itemprop="sku" content="{{ title | replace(' ', '-') | lower }}" />
+    <meta itemprop="weight" content="{{ specs.weight_g }}" />
+  </section>
+
+  <!-- FAQ with FAQPage Schema -->
+  <section class="faq" itemscope itemtype="https://schema.org/FAQPage">
+    <h3>常见问题</h3>
+    {% for q, a in faqs.items() %}
+    <div itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
+      <h4 itemprop="name">{{ q }}</h4>
+      <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
+        <p itemprop="text">{{ a }}</p>
+      </div>
+    </div>
+    {% endfor %}
+  </section>
+
+  <!-- Trust Signals -->
+  <section class="trust-signals">
+    <h3>为什么选择我们</h3>
+    <ul>
+      <li>{{ trust_anchors }}</li>
+      <li>30天无理由退换货</li>
+      <li>全球免费配送（美国境内3-7天达）</li>
+      <li>24/7 客服支持</li>
+    </ul>
+  </section>
+
+  <!-- Internal Links Block -->
+  <section class="related-products">
+    <h3>你可能也喜欢</h3>
+    <ul>
+      <li><a href="/collections/{{ niche | lower | replace(' ', '-') }}">更多 {{ niche }} 产品</a></li>
+      <li><a href="/blogs/guides/how-to-choose-{{ niche | lower | replace(' ', '-') }}">{{ niche }} 选购指南</a></li>
+    </ul>
+  </section>
+
+  <!-- BreadcrumbList Schema -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [
+      {"@type": "ListItem", "position": 1, "name": "Home", "item": "https://yourstore.com"},
+      {"@type": "ListItem", "position": 2, "name": "{{ niche }}", "item": "https://yourstore.com/collections/{{ niche | lower | replace(' ', '-') }}"},
+      {"@type": "ListItem", "position": 3, "name": "{{ title }}", "item": "https://yourstore.com/products/{{ title | replace(' ', '-') | lower }}"}
+    ]
+  }
+  </script>
+</div>
+{% endraw %}
