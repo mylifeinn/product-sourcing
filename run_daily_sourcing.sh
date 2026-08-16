@@ -15,8 +15,17 @@ mkdir -p logs
 STAMP=$(date '+%Y-%m-%d %H:%M:%S')
 echo "=== [$STAMP] 开始每日选品 (limit=$LIMIT) ==="
 
-# 全量抓取 + 评分 + 去重 + 落库 + Notion 同步
-.venv/bin/python -m sourcing fetch-all --limit "$LIMIT"
+# 全量抓取 + 评分 + 去重 + 落库(带 CPU 限流)
+.venv/bin/python -m sourcing fetch-all --limit "$LIMIT" --sleep 15
+
+# Notion 清空 + ASIN 去重 + 全量同步(序号按 score 降序)
+echo "[$STAMP] 同步 Notion (清空+去重)..."
+.venv/bin/python -c "
+from sourcing.notion.sync import NotionSync
+n = NotionSync()
+result = n.sync_all_deduped(clear_first=True)
+print(f'同步结果: {result}')
+" 2>&1 | grep -v WARNING
 
 # 可选: 健康检查(有发布产品后启用)
 # .venv/bin/python -m sourcing healthcheck --days 30
