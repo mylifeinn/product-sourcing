@@ -98,20 +98,24 @@ class ProductCandidate:
     
     def to_notion_properties(self) -> dict:
         """Convert to Notion API properties format"""
+        # gate 三态中 None(数据不足) → Notion checkbox 只接受 bool, 转 False
+        def _cb(name: str) -> bool:
+            return self.gate_results.get(name) is True
+
         return {
             "Candidate ID": {"title": [{"text": {"content": self.id}}]},
             "产品标题": {"rich_text": [{"text": {"content": self.title}}]},
             "细分品类": {"select": {"name": self.niche}},
             "痛点关键词": {"multi_select": [{"name": kw} for kw in self.pain_point_keywords]},
-            "Gate 1 痛点词": {"checkbox": self.gate_results.get("gate_1", False)},
-            "Gate 2 趋势": {"checkbox": self.gate_results.get("gate_2", False)},
-            "Gate 3 毛利": {"checkbox": self.gate_results.get("gate_3", False)},
-            "Gate 4 轻便": {"checkbox": self.gate_results.get("gate_4", False)},
-            "Gate 5 质量": {"checkbox": self.gate_results.get("gate_5", False)},
-            "Gate 6 独特性": {"checkbox": self.gate_results.get("gate_6", False)},
-            "Gate 7 长青性": {"checkbox": self.gate_results.get("gate_7", False)},
-            "Gate 8 验证": {"checkbox": self.gate_results.get("gate_8", False)},
-            "Gate 9 客户价值": {"checkbox": self.gate_results.get("gate_9", False)},
+            "Gate 1 痛点词": {"checkbox": _cb("gate_1")},
+            "Gate 2 趋势": {"checkbox": _cb("gate_2")},
+            "Gate 3 毛利": {"checkbox": _cb("gate_3")},
+            "Gate 4 轻便": {"checkbox": _cb("gate_4")},
+            "Gate 5 质量": {"checkbox": _cb("gate_5")},
+            "Gate 6 独特性": {"checkbox": _cb("gate_6")},
+            "Gate 7 长青性": {"checkbox": _cb("gate_7")},
+            "Gate 8 验证": {"checkbox": _cb("gate_8")},
+            "Gate 9 客户价值": {"checkbox": _cb("gate_9")},
             "专利风险": {"select": {"name": self.patent_risk_level}},
             "商标风险": {"select": {"name": self.trademark_risk_level}},
             "总分": {"number": self.total_score},

@@ -432,7 +432,7 @@ def init_notion(
         return
 
     # 写入 .env
-    env_path = Path(__file__).parent.parent.parent.parent / ".env"
+    env_path = Path(__file__).parent.parent.parent / ".env"
     lines = []
     if env_path.exists():
         lines = env_path.read_text().splitlines()

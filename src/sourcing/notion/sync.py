@@ -18,7 +18,8 @@ class NotionSync:
         self.db_id = settings.notion_db_id
         self.client = None
         
-        if self.token and self.db_id:
+        # 只要 token 存在就初始化 client(db_id 可能尚未建库, 建库后再补)
+        if self.token:
             self.client = Client(auth=self.token)
     
     def test_connection(self) -> bool:
@@ -136,17 +137,37 @@ class NotionSync:
         }
 
     def create_database(self, parent_page_id: str) -> Optional[str]:
-        """在父页面下创建审核数据库, 返回 database_id"""
+        """在父页面下创建审核数据库, 返回 database_id。
+
+        ⚠️ 不用 notion_client.databases.create: 该库对 properties 序列化有 bug
+        (中文属性名 + select options 会静默丢弃, 只留默认 Name)。改用 httpx 直连 API。
+        """
         if not self.client:
             return None
+        import httpx
+
+        body = {
+            "parent": {"type": "page_id", "page_id": parent_page_id},
+            "title": [{"text": {"content": "选品审核板"}}],
+            "properties": self.build_database_schema(),
+        }
         try:
-            resp = self.client.databases.create(
-                parent={"page_id": parent_page_id},
-                title=[{"text": {"content": "选品审核板"}}],
-                properties=self.build_database_schema(),
+            resp = httpx.post(
+                "https://api.notion.com/v1/databases",
+                headers={
+                    "Authorization": f"Bearer {self.token}",
+                    "Notion-Version": "2022-06-28",
+                    "Content-Type": "application/json",
+                },
+                json=body,
+                timeout=30,
             )
-            return resp.get("id")
-        except APIResponseError as e:
+            data = resp.json()
+            if resp.status_code == 200:
+                return data.get("id")
+            print(f"Notion create database error: {data.get('message', data)}")
+            return None
+        except Exception as e:
             print(f"Notion create database error: {e}")
             return None
 
