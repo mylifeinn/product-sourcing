@@ -139,6 +139,130 @@ def score(
 
 
 @app.command()
+def fetch_all(
+    source: str = typer.Option("public", "--source", "-s", help="Data source"),
+    limit: int = typer.Option(8, "--limit", "-l", help="Max products per niche"),
+    start_from: Optional[str] = typer.Option(None, "--start-from", help="Resume from this niche (inclusive)"),
+):
+    """Fetch candidates for ALL seed niches from config (多样化批量选品)"""
+    config = get_config()
+    niches = list(config.seed_niches)
+    if not niches:
+        console.print("[red]No seed_niches in config.yaml. Add some first.[/red]")
+        return
+
+    if start_from:
+        try:
+            idx = niches.index(start_from)
+            niches = niches[idx:]
+        except ValueError:
+            console.print(f"[yellow]Niche '{start_from}' not in seed list, starting from beginning[/yellow]")
+
+    console.print(f"[bold blue]Fetching {len(niches)} niches × up to {limit} products[/bold blue]")
+    console.print(f"Niches: {', '.join(niches)}")
+
+    all_candidates = []
+    for i, niche in enumerate(niches, 1):
+        console.print(f"\n[cyan][{i}/{len(niches)}] {niche}[/cyan]")
+        try:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+            ) as progress:
+                task = progress.add_task(f"Fetching {niche}...", total=None)
+                candidates = asyncio.run(fetch_niche(niche, source, limit))
+                progress.update(task, description=f"Fetched {len(candidates)} raw candidates")
+
+            if not candidates:
+                console.print(f"  [yellow]No candidates for {niche}[/yellow]")
+                continue
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+            ) as progress:
+                task = progress.add_task("Enriching...", total=None)
+                candidates = enrich_candidates(candidates)
+                progress.update(task, description="Scoring...")
+                candidates = score_candidates(candidates)
+                progress.update(task, description="Deduplicating...")
+                candidates = dedup_candidates(candidates)
+                progress.update(task, description="Compliance check...")
+                candidates = run_compliance_checks(candidates)
+
+            all_candidates.extend(candidates)
+            console.print(f"  [green]✓ {len(candidates)} candidates[/green]")
+        except Exception as e:
+            console.print(f"  [red]✗ {niche} failed: {e}[/red]")
+            continue
+
+    if not all_candidates:
+        console.print("[red]No candidates across all niches[/red]")
+        return
+
+    # 跨 niche 去重: 同一 ASIN 只保留 score 最高者(避免同类产品刷屏)
+    before = len(all_candidates)
+    seen_asin: dict[str, ProductCandidate] = {}
+    import re as _re
+    for c in sorted(all_candidates, key=lambda x: x.total_score, reverse=True):
+        asin = ""
+        if c.competitor_urls:
+            m = _re.search(r'/dp/([A-Z0-9]{10})', c.competitor_urls[0])
+            asin = m.group(1) if m else ""
+        if asin:
+            if asin not in seen_asin:
+                seen_asin[asin] = c
+        else:
+            seen_asin.setdefault(c.id, c)
+    all_candidates = list(seen_asin.values())
+    console.print(f"[yellow]跨 niche 去重: {before} → {len(all_candidates)} (同 ASIN 保留最高分)[/yellow]")
+
+    # 落库 + Notion
+    for c in all_candidates:
+        upsert_candidate(c)
+
+    notion = NotionSync()
+    if notion.client:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Syncing to Notion...", total=None)
+            synced = notion.bulk_upsert(all_candidates)
+            progress.update(task, description=f"Synced {synced}/{len(all_candidates)} to Notion")
+    else:
+        console.print("[yellow]Notion not configured (skip sync). Set NOTION_TOKEN + NOTION_DB_ID in .env[/yellow]")
+
+    # 汇总表: 按 score 排序
+    table = Table(title=f"Batch Results — {len(niches)} niches, {len(all_candidates)} candidates")
+    table.add_column("ID", style="cyan")
+    table.add_column("Niche", style="magenta")
+    table.add_column("Title", style="white")
+    table.add_column("Score", justify="right", style="green")
+    table.add_column("Gates", style="blue")
+    table.add_column("Margin%", justify="right", style="yellow")
+    table.add_column("完整度", justify="right", style="blue")
+
+    for c in sorted(all_candidates, key=lambda x: x.total_score, reverse=True)[:40]:
+        gates_passed = sum(1 for v in c.gate_results.values() if v is True)
+        table.add_row(
+            c.id,
+            c.niche[:22],
+            c.title[:40],
+            str(c.total_score),
+            f"{gates_passed}/9",
+            f"{c.estimated_margin_pct:.0f}%",
+            f"{c.data_completeness_pct}%",
+        )
+
+    console.print(table)
+    console.print(f"\n[green]Done! {len(all_candidates)} candidates saved.[/green]")
+
+
+@app.command()
 def export(
     status: str = typer.Option("pending", "--status", "-s", help="Filter by review status"),
     format: str = typer.Option("csv", "--format", "-f", help="Export format: csv, json"),
@@ -277,6 +401,53 @@ def healthcheck(
     
     console.print(table)
     send_alerts(results)
+
+
+@app.command()
+def init_notion(
+    page: str = typer.Argument(..., help="Notion 父页面 URL 或 ID (页面需已连接 integration)"),
+):
+    """自动创建选品审核数据库并写入 .env"""
+    settings = get_settings()
+    if not settings.notion_token:
+        console.print("[red]NOTION_TOKEN 未配置。先在 .env 填入 Notion Integration Token[/red]")
+        return
+
+    notion = NotionSync()
+    if not notion.client:
+        console.print("[red]Notion client init failed[/red]")
+        return
+
+    page_id = notion.parse_page_id(page)
+    if not page_id:
+        console.print("[red]无法从输入解析 page_id. 请提供 Notion 页面 URL 或 32 位 ID[/red]")
+        return
+
+    console.print(f"[blue]Creating database under page {page_id}...[/blue]")
+    db_id = notion.create_database(page_id)
+    if not db_id:
+        console.print("[red]创建数据库失败。常见原因:[/red]")
+        console.print("  1. integration 未连接到该页面 (页面右上 ... → Connections → 添加) ")
+        console.print("  2. token 无权限 (确认 integration 选了 workspace 且有 read/write)")
+        return
+
+    # 写入 .env
+    env_path = Path(__file__).parent.parent.parent.parent / ".env"
+    lines = []
+    if env_path.exists():
+        lines = env_path.read_text().splitlines()
+    found = False
+    for i, line in enumerate(lines):
+        if line.startswith("NOTION_DB_ID="):
+            lines[i] = f"NOTION_DB_ID={db_id}"
+            found = True
+    if not found:
+        lines.append(f"NOTION_DB_ID={db_id}")
+    env_path.write_text("\n".join(lines) + "\n")
+
+    console.print(f"[green]✓ 数据库已创建: https://www.notion.so/{db_id.replace('-','')}[/green]")
+    console.print(f"[green]✓ NOTION_DB_ID 已写入 .env[/green]")
+    console.print("[blue]运行 python -m sourcing test_notion 验证连接[/blue]")
 
 
 @app.command()

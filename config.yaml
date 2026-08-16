@@ -144,8 +144,39 @@ wholesale:
   max_offers_per_niche: 10
   request_timeout: 45
 
-# Seed niches (will be populated from Q21)
-seed_niches: []
+# Seed niches — 多样化产品方向库(跨品类)。
+# 设计原则: 痛点明确 + 轻便(≤500g) + 非标品有差异化空间 + 长青或长季节 + Amazon 有验证。
+# 跑 fetch-all 会遍历这里, 每个方向出一批候选 → 审核板里自然多样。
+# 想加/删方向直接改这个列表。
+seed_niches:
+  # --- 健康/康复 ---
+  - "portable neck massager"
+  - "posture corrector for back pain"
+  - "heated shoulder massager"
+  - "cervical pillow for neck pain"
+  - "acupressure mat for back pain"
+  # --- 睡眠 ---
+  - "sleep mask with bluetooth headphones"
+  - "white noise machine portable"
+  # --- 办公/数码配件 ---
+  - "magnetic cable organizer desktop"
+  - "phone stand for desk adjustable"
+  - "laptop stand for desk aluminum"
+  - "usb c hub for macbook"
+  - "tablet holder for bed adjustable"
+  # --- 宠物 ---
+  - "dog nail grinder quiet"
+  - "pet hair remover glove"
+  - "cat water fountain filter"
+  # --- 厨房 ---
+  - "milk frother handheld rechargeable"
+  - "silicone food storage bags reusable"
+  # --- 美容/个人护理 ---
+  - "facial ice roller for puffiness"
+  - "scalp massager shampoo brush"
+  # --- 出行 ---
+  - "bike phone mount waterproof"
+  - "book stand for reading hands free"
 
 # Brand config for SEO template (from Q22)
 brand:

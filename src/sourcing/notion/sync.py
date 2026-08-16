@@ -96,3 +96,73 @@ class NotionSync:
             if self.upsert_candidate(candidate):
                 success += 1
         return success
+
+    # ------------------------------------------------------------------
+    # 自动创建审核数据库(用户只需提供 token + 父页面, 不用手动建库)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def build_database_schema() -> dict:
+        """审核数据库完整属性 schema(与 models.to_notion_properties 对齐)"""
+        return {
+            "Candidate ID": {"title": {}},
+            "产品标题": {"rich_text": {}},
+            "细分品类": {"select": {"options": []}},
+            "痛点关键词": {"multi_select": {"options": []}},
+            "Gate 1 痛点词": {"checkbox": {}},
+            "Gate 2 趋势": {"checkbox": {}},
+            "Gate 3 毛利": {"checkbox": {}},
+            "Gate 4 轻便": {"checkbox": {}},
+            "Gate 5 质量": {"checkbox": {}},
+            "Gate 6 独特性": {"checkbox": {}},
+            "Gate 7 长青性": {"checkbox": {}},
+            "Gate 8 验证": {"checkbox": {}},
+            "Gate 9 客户价值": {"checkbox": {}},
+            "专利风险": {"select": {"options": [{"name": "无"}, {"name": "低"}, {"name": "高"}]}},
+            "商标风险": {"select": {"options": [{"name": "无"}, {"name": "低"}, {"name": "高"}]}},
+            "总分": {"number": {}},
+            "通过状态": {"select": {"options": [{"name": "通过"}, {"name": "拒绝"}, {"name": "人工豁免"}]}},
+            "批发价": {"number": {}},
+            "建议零售价": {"number": {}},
+            "毛利率%": {"number": {}},
+            "重量(g)": {"number": {}},
+            "尺寸(cm)": {"rich_text": {}},
+            "物流渠道": {"rich_text": {}},
+            "供应商链接": {"url": {}},
+            "供应商联系人": {"rich_text": {}},
+            "竞品验证链接": {"url": {}},
+            "审核状态": {"select": {"options": [{"name": "待审"}, {"name": "通过"}, {"name": "拒绝"}, {"name": "豁免通过"}]}},
+            "审核备注": {"rich_text": {}},
+            "健康度": {"select": {"options": [{"name": "健康"}, {"name": "需关注"}, {"name": "待优化"}]}},
+        }
+
+    def create_database(self, parent_page_id: str) -> Optional[str]:
+        """在父页面下创建审核数据库, 返回 database_id"""
+        if not self.client:
+            return None
+        try:
+            resp = self.client.databases.create(
+                parent={"page_id": parent_page_id},
+                title=[{"text": {"content": "选品审核板"}}],
+                properties=self.build_database_schema(),
+            )
+            return resp.get("id")
+        except APIResponseError as e:
+            print(f"Notion create database error: {e}")
+            return None
+
+    @staticmethod
+    def parse_page_id(page_url_or_id: str) -> str:
+        """从 Notion 页面 URL 或裸 ID 提取 page_id。
+
+        支持:
+        - https://www.notion.so/MyPage-1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d
+        - https://www.notion.so/workspace/1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d?v=xxx
+        - 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d (裸 ID)
+        """
+        import re as _re
+        s = (page_url_or_id or "").strip()
+        # 匹配 32 位 hex (允许带连字符)
+        m = _re.search(r'([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})', s, _re.I)
+        if m:
+            return m.group(1).replace("-", "")
+        return ""

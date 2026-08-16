@@ -120,6 +120,7 @@ class PipelineConfig(BaseModel):
     healthcheck: HealthcheckConfig = Field(default_factory=HealthcheckConfig)
     keepa: KeepaConfig = Field(default_factory=KeepaConfig)
     wholesale: WholesaleConfig = Field(default_factory=WholesaleConfig)
+    seed_niches: list[str] = Field(default_factory=list)
 
 
 class Settings(BaseSettings):
@@ -153,6 +154,9 @@ def load_config() -> tuple[PipelineConfig, Settings]:
         raw = yaml.safe_load(f)
     
     pipeline = PipelineConfig(**raw.get("pipeline", {}))
+    # seed_niches 在 YAML 顶层(不在 pipeline 下), 单独合并
+    if raw.get("seed_niches"):
+        pipeline.seed_niches = list(raw["seed_niches"])
     settings = Settings()
     
     return pipeline, settings

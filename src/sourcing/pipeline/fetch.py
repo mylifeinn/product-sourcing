@@ -230,7 +230,7 @@ async def fetch_niche(niche: str, source: str = "public", limit: int = 20) -> Li
 
     # Gate 6: Amazon 同款检测(REAL, 前3页; 只测前 max_check 个, 限速防反爬)
     try:
-        await check_amazon_duplicates_batch(candidates, max_check=10, concurrency=2)
+        await check_amazon_duplicates_batch(candidates, max_check=min(10, limit), concurrency=2)
     except Exception as e:
         print(f"[dup-check] batch failed: {e}")
 
