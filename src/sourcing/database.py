@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS candidates (
     competitor_sales_90d INTEGER DEFAULT 0,
     competitor_reviews INTEGER DEFAULT 0,
     market_proof_urls TEXT NOT NULL,
+    amazon_rating REAL DEFAULT 0,
     estimated_aov_usd REAL DEFAULT 0,
     estimated_repurchase_cycle_days INTEGER DEFAULT 0,
     estimated_ltv_orders REAL DEFAULT 0,
@@ -52,8 +53,12 @@ CREATE TABLE IF NOT EXISTS candidates (
     trademark_risk_level TEXT DEFAULT 'none',
     matched_patents TEXT NOT NULL,
     gate_results TEXT NOT NULL,
+    gate_details TEXT NOT NULL,
     total_score INTEGER DEFAULT 0,
     passed_all_gates INTEGER DEFAULT 0,
+    needs_manual_review INTEGER DEFAULT 0,
+    data_completeness_pct REAL DEFAULT 0,
+    data_provenance TEXT NOT NULL,
     review_status TEXT DEFAULT 'pending',
     review_notes TEXT DEFAULT '',
     shopify_draft_id INTEGER,
@@ -67,6 +72,15 @@ CREATE INDEX IF NOT EXISTS idx_niche ON candidates(niche);
 CREATE INDEX IF NOT EXISTS idx_review_status ON candidates(review_status);
 CREATE INDEX IF NOT EXISTS idx_created_at ON candidates(created_at);
 """
+
+# 新增列迁移(老库补列)
+MIGRATIONS = [
+    ("amazon_rating", "ALTER TABLE candidates ADD COLUMN amazon_rating REAL DEFAULT 0"),
+    ("gate_details", "ALTER TABLE candidates ADD COLUMN gate_details TEXT NOT NULL DEFAULT '{}'"),
+    ("needs_manual_review", "ALTER TABLE candidates ADD COLUMN needs_manual_review INTEGER DEFAULT 0"),
+    ("data_completeness_pct", "ALTER TABLE candidates ADD COLUMN data_completeness_pct REAL DEFAULT 0"),
+    ("data_provenance", "ALTER TABLE candidates ADD COLUMN data_provenance TEXT NOT NULL DEFAULT '{}'"),
+]
 
 
 @contextmanager
@@ -82,72 +96,33 @@ def get_conn():
 def init_db():
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        # 老库补列
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(candidates)").fetchall()}
+        for col, ddl in MIGRATIONS:
+            if col not in existing:
+                conn.execute(ddl)
         conn.commit()
 
 
 def upsert_candidate(candidate: ProductCandidate) -> None:
     db_model = CandidateDB.from_candidate(candidate)
     with get_conn() as conn:
-        conn.execute("""
-            INSERT OR REPLACE INTO candidates (
-                id, title, niche, pain_point_keywords, trend_score, longtail_keywords,
-                google_trends_yoy_pct, tiktok_hashtag_growth_pct, wholesale_price_usd,
-                estimated_retail_price_usd, estimated_shipping_usd, estimated_margin_pct,
-                weight_g, dimensions_cm, shipping_channel, supplier_rating, refund_rate_pct,
-                has_actual_photos, supplier_url, supplier_contact, uniqueness_passed,
-                competitor_urls, is_evergreen, seasonal_peak_window_days, prep_lead_time_days,
-                competitor_sales_90d, competitor_reviews, market_proof_urls,
-                estimated_aov_usd, estimated_repurchase_cycle_days, estimated_ltv_orders,
-                patent_risk_level, trademark_risk_level, matched_patents, gate_results,
-                total_score, passed_all_gates, review_status, review_notes,
-                shopify_draft_id, shopify_product_id, published_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            db_model.id,
-            db_model.title,
-            db_model.niche,
-            db_model.pain_point_keywords,
-            db_model.trend_score,
-            db_model.longtail_keywords,
-            db_model.google_trends_yoy_pct,
-            db_model.tiktok_hashtag_growth_pct,
-            db_model.wholesale_price_usd,
-            db_model.estimated_retail_price_usd,
-            db_model.estimated_shipping_usd,
-            db_model.estimated_margin_pct,
-            db_model.weight_g,
-            db_model.dimensions_cm,
-            db_model.shipping_channel,
-            db_model.supplier_rating,
-            db_model.refund_rate_pct,
-            int(db_model.has_actual_photos),
-            db_model.supplier_url,
-            db_model.supplier_contact,
-            int(db_model.uniqueness_passed),
-            db_model.competitor_urls,
-            int(db_model.is_evergreen),
-            db_model.seasonal_peak_window_days,
-            db_model.prep_lead_time_days,
-            db_model.competitor_sales_90d,
-            db_model.competitor_reviews,
-            db_model.market_proof_urls,
-            db_model.estimated_aov_usd,
-            db_model.estimated_repurchase_cycle_days,
-            db_model.estimated_ltv_orders,
-            db_model.patent_risk_level,
-            db_model.trademark_risk_level,
-            db_model.matched_patents,
-            db_model.gate_results,
-            db_model.total_score,
-            int(db_model.passed_all_gates),
-            db_model.review_status,
-            db_model.review_notes,
-            db_model.shopify_draft_id,
-            db_model.shopify_product_id,
-            db_model.published_at.isoformat() if db_model.published_at else None,
-            db_model.created_at.isoformat(),
-            db_model.updated_at.isoformat(),
-        ))
+        # 动态生成 INSERT, 列与值由 CandidateDB 字段驱动, 避免不同步
+        columns = list(CandidateDB.model_fields.keys())
+        placeholders = ", ".join(["?"] * len(columns))
+        col_sql = ", ".join(columns)
+        values = []
+        for col in columns:
+            v = getattr(db_model, col)
+            if isinstance(v, bool):
+                v = int(v)
+            elif isinstance(v, datetime):
+                v = v.isoformat()
+            values.append(v)
+        conn.execute(
+            f"INSERT OR REPLACE INTO candidates ({col_sql}) VALUES ({placeholders})",
+            values,
+        )
         conn.commit()
 
 

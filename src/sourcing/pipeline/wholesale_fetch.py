@@ -357,6 +357,10 @@ class AliExpressFetcher:
 
 
 async def fetch_wholesale_offers(niche: str, limit: int = 10) -> List[WholesaleOffer]:
-    """入口函数"""
+    """入口函数(受 config.wholesale 开关控制, 默认禁用避免反爬超时)"""
+    from sourcing.config import get_config
+    cfg = get_config()
+    if not (cfg.wholesale.aliexpress_enabled or cfg.wholesale.alibaba_enabled):
+        return []
     fetcher = AliExpressFetcher()
     return await fetcher.search_wholesale(niche, limit)

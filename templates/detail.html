@@ -11,6 +11,7 @@
         .gate-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
         .gate-passed { border-left: 4px solid #198754; }
         .gate-failed { border-left: 4px solid #dc3545; }
+        .gate-missing { border-left: 4px solid #6c757d; }
     </style>
 </head>
 <body class="bg-light">
@@ -101,12 +102,12 @@
                         <div class="row g-3">
                             {% for gate in gates %}
                             <div class="col-12 col-md-6 col-lg-4">
-                                <div class="card gate-card h-100 {% if gate.passed %}gate-passed{% else %}gate-failed{% endif %}">
+                                <div class="card gate-card h-100 {% if gate.passed is none %}gate-missing{% elif gate.passed %}gate-passed{% else %}gate-failed{% endif %}">
                                     <div class="card-body">
                                         <div class="d-flex justify-content-between align-items-start mb-2">
                                             <h6 class="mb-0">{{ gate.label }}</h6>
-                                            <span class="badge {% if gate.passed %}bg-success{% else %}bg-danger{% endif %}">
-                                                {% if gate.passed %}<i class="bi bi-check"></i> 通过{% else %}<i class="bi bi-x"></i> 失败{% endif %}
+                                            <span class="badge {% if gate.passed is none %}bg-secondary{% elif gate.passed %}bg-success{% else %}bg-danger{% endif %}">
+                                                {% if gate.passed is none %}<i class="bi bi-question-circle"></i> 数据不足{% elif gate.passed %}<i class="bi bi-check"></i> 通过{% else %}<i class="bi bi-x"></i> 未达标{% endif %}
                                             </span>
                                         </div>
                                         <p class="text-muted small mb-0">{{ gate.detail }}</p>

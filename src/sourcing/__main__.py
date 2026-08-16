@@ -39,7 +39,7 @@ def callback():
 @app.command()
 def fetch(
     niche: str = typer.Argument(..., help="Niche/keyword to search for"),
-    source: str = typer.Option("mock", "--source", "-s", help="Data source: mock, 1688, tiktok, competitor"),
+    source: str = typer.Option("public", "--source", "-s", help="Data source: public(真实公开数据, 默认), real, mock(仅测试)"),
     limit: int = typer.Option(20, "--limit", "-l", help="Max products to fetch"),
 ):
     """Fetch product candidates for a niche"""
@@ -97,10 +97,12 @@ def fetch(
     table.add_column("Margin%", justify="right", style="yellow")
     table.add_column("Weight(g)", justify="right")
     table.add_column("Gates", style="magenta")
+    table.add_column("完整度", justify="right", style="blue")
+    table.add_column("需复核", style="red")
     table.add_column("Status", style="blue")
-    
+
     for c in candidates:
-        gates_passed = sum(1 for v in c.gate_results.values() if v)
+        gates_passed = sum(1 for v in c.gate_results.values() if v is True)
         gates_str = f"{gates_passed}/9 {'✅' if c.passed_all_gates else '❌'}"
         table.add_row(
             c.id,
@@ -109,6 +111,8 @@ def fetch(
             f"{c.estimated_margin_pct:.1f}%",
             f"{c.weight_g:.0f}",
             gates_str,
+            f"{c.data_completeness_pct}%",
+            "⚠️" if c.needs_manual_review else "",
             c.review_status,
         )
     

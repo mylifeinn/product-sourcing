@@ -69,15 +69,15 @@ async def dashboard(request: Request):
         c = run_compliance_check(c)
         
         gates = [
-                    {"name": "gate_1", "label": "痛点关键词", "passed": c.gate_results.get("gate_1", False), "detail": f"{len([k for k in c.longtail_keywords if k.get('volume',0)>=500 and k.get('kd',99)<=30])} 个合格词"},
-                    {"name": "gate_2", "label": "趋势验证", "passed": c.gate_results.get("gate_2", False), "detail": f"Trends YoY: {c.google_trends_yoy_pct:.1f}%"},
-                    {"name": "gate_3", "label": "毛利≥45%", "passed": c.gate_results.get("gate_3", False), "detail": f"{c.estimated_margin_pct:.1f}%"},
-                    {"name": "gate_4", "label": "轻便≤500g", "passed": c.gate_results.get("gate_4", False), "detail": f"{c.weight_g:.0f}g, {c.dimensions_cm[0]:.0f}×{c.dimensions_cm[1]:.0f}×{c.dimensions_cm[2]:.0f}cm"},
-                    {"name": "gate_5", "label": "质量达标", "passed": c.gate_results.get("gate_5", False), "detail": f"供应商评分 {c.supplier_rating:.1f}, 退款率 {c.refund_rate_pct:.1f}%"},
-                    {"name": "gate_6", "label": "独特性", "passed": c.gate_results.get("gate_6", False), "detail": "无同款竞品" if c.uniqueness_passed else "发现同款"},
-                    {"name": "gate_7", "label": "长青/季节", "passed": c.gate_results.get("gate_7", False), "detail": "长青" if c.is_evergreen else f"季节性 {c.seasonal_peak_window_days}天"},
-                    {"name": "gate_8", "label": "市场验证", "passed": c.gate_results.get("gate_8", False), "detail": f"竞品90天销量 {c.competitor_sales_90d}, 评论 {c.competitor_reviews}"},
-                    {"name": "gate_9", "label": "客户价值", "passed": c.gate_results.get("gate_9", False), "detail": f"AOV ${c.estimated_aov_usd:.0f}, LTV {c.estimated_ltv_orders:.1f}单"},
+                    {"name": "gate_1", "label": "痛点关键词", "passed": c.gate_results.get("gate_1", False), "detail": c.gate_details.get("gate_1", "")},
+                    {"name": "gate_2", "label": "趋势验证", "passed": c.gate_results.get("gate_2", False), "detail": c.gate_details.get("gate_2", "")},
+                    {"name": "gate_3", "label": "毛利≥45%", "passed": c.gate_results.get("gate_3", False), "detail": c.gate_details.get("gate_3", "")},
+                    {"name": "gate_4", "label": "轻便≤500g", "passed": c.gate_results.get("gate_4", False), "detail": c.gate_details.get("gate_4", "")},
+                    {"name": "gate_5", "label": "质量达标", "passed": c.gate_results.get("gate_5", False), "detail": c.gate_details.get("gate_5", "")},
+                    {"name": "gate_6", "label": "独特性", "passed": c.gate_results.get("gate_6", False), "detail": c.gate_details.get("gate_6", "")},
+                    {"name": "gate_7", "label": "长青/季节", "passed": c.gate_results.get("gate_7", False), "detail": c.gate_details.get("gate_7", "")},
+                    {"name": "gate_8", "label": "市场验证", "passed": c.gate_results.get("gate_8", False), "detail": c.gate_details.get("gate_8", "")},
+                    {"name": "gate_9", "label": "客户价值", "passed": c.gate_results.get("gate_9", False), "detail": c.gate_details.get("gate_9", "")},
                 ]
         
         passed_count = sum(1 for g in gates if g["passed"])
@@ -88,6 +88,7 @@ async def dashboard(request: Request):
             "passed_count": passed_count,
             "total_gates": len(gates),
             "margin_color": "green" if c.estimated_margin_pct >= 45 else "orange" if c.estimated_margin_pct >= 30 else "red",
+            "score_color": "success" if c.total_score >= 70 else "warning" if c.total_score >= 40 else "danger",
         })
     
     # Sort by score desc, then passed_count desc
@@ -117,15 +118,15 @@ async def candidate_detail(request: Request, candidate_id: str):
     c = run_compliance_check(c)
     
     gates = [
-        {"name": "gate_1", "label": "痛点关键词 (≥3词, 搜索量≥500, KD≤30)", "passed": c.gate_results.get("gate_1", False), "detail": f"{len(c.longtail_keywords)} 个长尾词"},
-        {"name": "gate_2", "label": "趋势 (Trends YoY≥20% 或 TikTok 7d≥50%)", "passed": c.gate_results.get("gate_2", False), "detail": f"Google Trends YoY: {c.google_trends_yoy_pct:.1f}%, TikTok代理: {c.tiktok_hashtag_growth_pct:.1f}%"},
-        {"name": "gate_3", "label": "毛利率 ≥45%", "passed": c.gate_results.get("gate_3", False), "detail": f"{c.estimated_margin_pct:.1f}% (零售${c.estimated_retail_price_usd:.2f} - 批发${c.wholesale_price_usd:.2f} - 运费${c.estimated_shipping_usd:.2f})"},
-        {"name": "gate_4", "label": "轻便 (≤500g, ≤30×20×10cm, ePacket/4PX)", "passed": c.gate_results.get("gate_4", False), "detail": f"{c.weight_g:.0f}g, {c.dimensions_cm[0]:.0f}×{c.dimensions_cm[1]:.0f}×{c.dimensions_cm[2]:.0f}cm, 渠道: {c.shipping_channel}"},
-        {"name": "gate_5", "label": "质量 (供应商≥4.7, 退款≤3%, 有实拍)", "passed": c.gate_results.get("gate_5", False), "detail": f"评分 {c.supplier_rating:.1f}, 退款 {c.refund_rate_pct:.1f}%, 实拍: {'是' if c.has_actual_photos else '否'}"},
-        {"name": "gate_6", "label": "独特性 (Amazon/TEMU/SHEIN前3页无同款)", "passed": c.gate_results.get("gate_6", False), "detail": "通过" if c.uniqueness_passed else "发现同款竞品"},
-        {"name": "gate_7", "label": "长青/季节 (长青波动≤30% 或 季节旺季≥90天)", "passed": c.gate_results.get("gate_7", False), "detail": "长青" if c.is_evergreen else f"季节性: 旺季 {c.seasonal_peak_window_days}天, 提前 {c.prep_lead_time_days}天备货"},
-        {"name": "gate_8", "label": "市场验证 (竞品90天销量≥50 或 评论≥200)", "passed": c.gate_results.get("gate_8", False), "detail": f"竞品销量 {c.competitor_sales_90d}, 评论 {c.competitor_reviews}"},
-        {"name": "gate_9", "label": "客户价值 (AOV≥$60, 复购≤90天, LTV≥3单)", "passed": c.gate_results.get("gate_9", False), "detail": f"AOV ${c.estimated_aov_usd:.0f}, 复购周期 {c.estimated_repurchase_cycle_days}天, LTV {c.estimated_ltv_orders:.1f}单"},
+        {"name": "gate_1", "label": "痛点关键词 (≥3词, 搜索量≥500, KD≤30)", "passed": c.gate_results.get("gate_1", False), "detail": c.gate_details.get("gate_1", "")},
+        {"name": "gate_2", "label": "趋势 (Trends YoY≥20% 或 TikTok 7d≥50%)", "passed": c.gate_results.get("gate_2", False), "detail": c.gate_details.get("gate_2", "")},
+        {"name": "gate_3", "label": "毛利率 ≥45%", "passed": c.gate_results.get("gate_3", False), "detail": c.gate_details.get("gate_3", "")},
+        {"name": "gate_4", "label": "轻便 (≤500g, ≤30×20×10cm, ePacket/4PX)", "passed": c.gate_results.get("gate_4", False), "detail": c.gate_details.get("gate_4", "")},
+        {"name": "gate_5", "label": "质量 (供应商≥4.7, 退款≤3%, 有实拍)", "passed": c.gate_results.get("gate_5", False), "detail": c.gate_details.get("gate_5", "")},
+        {"name": "gate_6", "label": "独特性 (Amazon/TEMU/SHEIN前3页无同款)", "passed": c.gate_results.get("gate_6", False), "detail": c.gate_details.get("gate_6", "")},
+        {"name": "gate_7", "label": "长青/季节 (长青波动≤30% 或 季节旺季≥90天)", "passed": c.gate_results.get("gate_7", False), "detail": c.gate_details.get("gate_7", "")},
+        {"name": "gate_8", "label": "市场验证 (竞品90天销量≥50 或 评论≥200)", "passed": c.gate_results.get("gate_8", False), "detail": c.gate_details.get("gate_8", "")},
+        {"name": "gate_9", "label": "客户价值 (AOV≥$60, 复购≤90天, LTV≥3单)", "passed": c.gate_results.get("gate_9", False), "detail": c.gate_details.get("gate_9", "")},
     ]
     
     # Cost estimate details if available

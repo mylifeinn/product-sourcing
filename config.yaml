@@ -125,9 +125,11 @@ keepa:
   domain: 1  # 1=US
 
 # Wholesale search settings
+# 默认禁用: AliExpress/Alibaba 反爬严重且无代理时超时; 启用需住宅代理。
+# 批发价在公开模式下由 CostEstimator 从竞品零售价反推(ESTIMATED)。
 wholesale:
-  aliexpress_enabled: true
-  alibaba_enabled: true
+  aliexpress_enabled: false
+  alibaba_enabled: false
   max_offers_per_niche: 10
   request_timeout: 45
 

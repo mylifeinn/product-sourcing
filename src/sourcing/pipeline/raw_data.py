@@ -26,6 +26,7 @@ class RawProductData:
     competitor_sales_90d: int = 0
     competitor_reviews: int = 0
     competitor_urls: List[str] = field(default_factory=list)
+    amazon_rating: float = 0.0  # Amazon 竞品评分 [REAL]
     # Seasonality
     is_evergreen: bool = True
     seasonal_peak_window_days: int = 0

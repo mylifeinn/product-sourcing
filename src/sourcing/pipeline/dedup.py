@@ -12,37 +12,29 @@ def similarity(a: str, b: str) -> float:
 
 
 def dedup_candidates(candidates: List[ProductCandidate]) -> List[ProductCandidate]:
-    """Deduplicate candidates by niche + pain_point_keywords similarity"""
+    """按产品标题相似度去重(同一产品在不同 listing 的重复)。
+
+    修复: 之前按 niche + pain_point_keywords 去重, 同 niche 候选的关键词相同,
+    导致所有产品被合并成 1 个。现在按标题相似度(≥0.85)去重, 保留分数高的。
+    """
     config = get_config()
     threshold = config.dedup.similarity_threshold
-    
+
     unique = []
     for candidate in candidates:
+        if not candidate.title.strip():
+            continue
         is_dup = False
         for existing in unique:
-            # Compare niche
-            niche_sim = similarity(candidate.niche, existing.niche)
-            
-            # Compare pain point keywords (jaccard-like)
-            kw_set_1 = set(candidate.pain_point_keywords)
-            kw_set_2 = set(existing.pain_point_keywords)
-            if kw_set_1 and kw_set_2:
-                kw_sim = len(kw_set_1 & kw_set_2) / len(kw_set_1 | kw_set_2)
-            else:
-                kw_sim = 0.0
-            
-            # Combined similarity
-            combined_sim = (niche_sim + kw_sim) / 2
-            
-            if combined_sim >= threshold:
+            if similarity(candidate.title, existing.title) >= threshold:
                 # Keep the one with higher score
                 if candidate.total_score > existing.total_score:
                     unique.remove(existing)
                     unique.append(candidate)
                 is_dup = True
                 break
-        
+
         if not is_dup:
             unique.append(candidate)
-    
+
     return unique

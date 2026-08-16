@@ -55,6 +55,7 @@ class ProductCandidate:
     competitor_sales_90d: int = 0
     competitor_reviews: int = 0
     market_proof_urls: list[str] = field(default_factory=list)
+    amazon_rating: float = 0.0  # Amazon 竞品评分 [REAL], 免费模式 Gate5 质量代理
     
     # Gate 9: Customer Value
     estimated_aov_usd: float = 0.0
@@ -71,8 +72,12 @@ class ProductCandidate:
     
     # Scoring
     gate_results: dict[str, bool] = field(default_factory=dict)
+    gate_details: dict[str, str] = field(default_factory=dict)  # 每个 gate 的判定依据说明
     total_score: int = 0
     passed_all_gates: bool = False
+    needs_manual_review: bool = False  # 有数据不足的 gate, 需人工补充确认
+    data_completeness_pct: float = 0.0  # REAL/ESTIMATED 字段占比
+    data_provenance: dict[str, str] = field(default_factory=dict)  # 字段→REAL/ESTIMATED/MISSING
     
     # Review
     review_status: str = "pending"  # pending, approved, rejected, waived
@@ -211,6 +216,7 @@ class CandidateDB(BaseModel):
     competitor_sales_90d: int
     competitor_reviews: int
     market_proof_urls: str  # JSON
+    amazon_rating: float
     estimated_aov_usd: float
     estimated_repurchase_cycle_days: int
     estimated_ltv_orders: float
@@ -218,8 +224,12 @@ class CandidateDB(BaseModel):
     trademark_risk_level: str
     matched_patents: str  # JSON
     gate_results: str  # JSON
+    gate_details: str  # JSON
     total_score: int
     passed_all_gates: bool
+    needs_manual_review: bool
+    data_completeness_pct: float
+    data_provenance: str  # JSON
     review_status: str
     review_notes: str
     shopify_draft_id: Optional[int]
@@ -259,6 +269,7 @@ class CandidateDB(BaseModel):
             competitor_sales_90d=c.competitor_sales_90d,
             competitor_reviews=c.competitor_reviews,
             market_proof_urls=json.dumps(c.market_proof_urls),
+            amazon_rating=c.amazon_rating,
             estimated_aov_usd=c.estimated_aov_usd,
             estimated_repurchase_cycle_days=c.estimated_repurchase_cycle_days,
             estimated_ltv_orders=c.estimated_ltv_orders,
@@ -266,8 +277,12 @@ class CandidateDB(BaseModel):
             trademark_risk_level=c.trademark_risk_level,
             matched_patents=json.dumps(c.matched_patents),
             gate_results=json.dumps(c.gate_results),
+            gate_details=json.dumps(c.gate_details),
             total_score=c.total_score,
             passed_all_gates=c.passed_all_gates,
+            needs_manual_review=c.needs_manual_review,
+            data_completeness_pct=c.data_completeness_pct,
+            data_provenance=json.dumps(c.data_provenance),
             review_status=c.review_status,
             review_notes=c.review_notes,
             shopify_draft_id=c.shopify_draft_id,
@@ -307,6 +322,7 @@ class CandidateDB(BaseModel):
         c.competitor_sales_90d = self.competitor_sales_90d
         c.competitor_reviews = self.competitor_reviews
         c.market_proof_urls = json.loads(self.market_proof_urls)
+        c.amazon_rating = self.amazon_rating
         c.estimated_aov_usd = self.estimated_aov_usd
         c.estimated_repurchase_cycle_days = self.estimated_repurchase_cycle_days
         c.estimated_ltv_orders = self.estimated_ltv_orders
@@ -314,8 +330,12 @@ class CandidateDB(BaseModel):
         c.trademark_risk_level = self.trademark_risk_level
         c.matched_patents = json.loads(self.matched_patents)
         c.gate_results = json.loads(self.gate_results)
+        c.gate_details = json.loads(self.gate_details)
         c.total_score = self.total_score
         c.passed_all_gates = self.passed_all_gates
+        c.needs_manual_review = self.needs_manual_review
+        c.data_completeness_pct = self.data_completeness_pct
+        c.data_provenance = json.loads(self.data_provenance)
         c.review_status = self.review_status
         c.review_notes = self.review_notes
         c.shopify_draft_id = self.shopify_draft_id

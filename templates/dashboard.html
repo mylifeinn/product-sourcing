@@ -77,6 +77,7 @@
                                 <th style="width: 120px;">品类</th>
                                 <th style="width: 80px;">得分</th>
                                 <th style="width: 100px;">通过/总门槛</th>
+                                <th style="width: 80px;">完整度</th>
                                 <th style="width: 100px;">毛利率</th>
                                 <th style="width: 100px;">重量/尺寸</th>
                                 <th style="width: 100px;">竞品验证</th>
@@ -95,14 +96,23 @@
                                 </td>
                                 <td>{{ item.candidate.niche }}</td>
                                 <td>
-                                    <span class="badge score-badge {% if item.candidate.total_score == 100 %}bg-success{% else %}bg-danger{% endif %}">
+                                    <span class="badge score-badge bg-{{ item.score_color }}">
                                         {{ item.candidate.total_score }}
                                     </span>
+                                    {% if item.candidate.needs_manual_review %}
+                                    <br><span class="badge bg-warning text-dark" title="有数据不足的门槛需人工确认">⚠ 需复核</span>
+                                    {% endif %}
                                 </td>
                                 <td>
                                     <span class="badge {% if item.passed_count == item.total_gates %}bg-success{% else %}bg-warning text-dark{% endif %}">
                                         {{ item.passed_count }} / {{ item.total_gates }}
                                     </span>
+                                </td>
+                                <td>
+                                    <span class="badge {% if item.candidate.data_completeness_pct >= 70 %}bg-success{% elif item.candidate.data_completeness_pct >= 40 %}bg-warning text-dark{% else %}bg-danger{% endif %}">
+                                        {{ item.candidate.data_completeness_pct }}%
+                                    </span>
+                                    <br><small class="text-muted">REAL/估算</small>
                                 </td>
                                 <td>
                                     <span class="margin-{{ item.margin_color }}">
