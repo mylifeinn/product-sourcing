@@ -14,10 +14,21 @@ pipeline:
       min_longtail_keywords: 3
       min_monthly_search: 500
       max_keyword_difficulty: 30
+      # 免费模式 volume 代理: Amazon 搜索结果总数(REAL)。搜索该词的结果数 ≥ 此值
+      # 视为有真实搜索量信号(与月搜索量强相关)。0 = 未抓到, 走宽松判定。
+      amazon_result_count_min: 500
     
     gate_2_trend:
       google_trends_90d_yoy_min_pct: 20
       tiktok_hashtag_7d_growth_min_pct: 50
+      # 上升长尾词通道: 头词 YoY 下跌时, 若 Trends rising queries 中有 ≥N 个
+      # 显著上升词(trending_value ≥ min_rising_value, REAL)则视为长尾在涨。
+      min_rising_keywords: 2
+      min_rising_value: 100
+      # BSR 改善通道: bsr_history 有多条快照(间隔≥14天)且 BSR 数值改善 ≥ 此百分比
+      # (BSR 越小越靠前) 视为单品在上升。
+      bsr_improvement_pct: 30
+      bsr_min_span_days: 14
     
     gate_3_margin:
       min_gross_margin_pct: 45  # (retail - wholesale - shipping - fees) / retail

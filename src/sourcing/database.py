@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS candidates (
     longtail_keywords TEXT NOT NULL,
     google_trends_yoy_pct REAL DEFAULT 0,
     tiktok_hashtag_growth_pct REAL DEFAULT 0,
+    amazon_bsr INTEGER DEFAULT 0,
+    amazon_result_count INTEGER DEFAULT 0,
     wholesale_price_usd REAL DEFAULT 0,
     estimated_retail_price_usd REAL DEFAULT 0,
     estimated_shipping_usd REAL DEFAULT 0,
@@ -39,6 +41,7 @@ CREATE TABLE IF NOT EXISTS candidates (
     supplier_contact TEXT DEFAULT '',
     uniqueness_passed INTEGER DEFAULT 0,
     competitor_urls TEXT NOT NULL,
+    amazon_duplicate_count INTEGER DEFAULT -1,
     is_evergreen INTEGER DEFAULT 1,
     seasonal_peak_window_days INTEGER DEFAULT 0,
     prep_lead_time_days INTEGER DEFAULT 0,
@@ -71,6 +74,16 @@ CREATE TABLE IF NOT EXISTS candidates (
 CREATE INDEX IF NOT EXISTS idx_niche ON candidates(niche);
 CREATE INDEX IF NOT EXISTS idx_review_status ON candidates(review_status);
 CREATE INDEX IF NOT EXISTS idx_created_at ON candidates(created_at);
+
+-- BSR 快照历史: 同一 ASIN 多次抓取, 用于 Gate2 单品趋势判定(BSR 改善=上升)
+CREATE TABLE IF NOT EXISTS bsr_history (
+    asin TEXT NOT NULL,
+    bsr INTEGER NOT NULL,
+    sales_90d INTEGER DEFAULT 0,
+    captured_at TEXT NOT NULL,
+    PRIMARY KEY (asin, captured_at)
+);
+CREATE INDEX IF NOT EXISTS idx_bsr_asin ON bsr_history(asin);
 """
 
 # 新增列迁移(老库补列)
@@ -80,6 +93,9 @@ MIGRATIONS = [
     ("needs_manual_review", "ALTER TABLE candidates ADD COLUMN needs_manual_review INTEGER DEFAULT 0"),
     ("data_completeness_pct", "ALTER TABLE candidates ADD COLUMN data_completeness_pct REAL DEFAULT 0"),
     ("data_provenance", "ALTER TABLE candidates ADD COLUMN data_provenance TEXT NOT NULL DEFAULT '{}'"),
+    ("amazon_bsr", "ALTER TABLE candidates ADD COLUMN amazon_bsr INTEGER DEFAULT 0"),
+    ("amazon_result_count", "ALTER TABLE candidates ADD COLUMN amazon_result_count INTEGER DEFAULT 0"),
+    ("amazon_duplicate_count", "ALTER TABLE candidates ADD COLUMN amazon_duplicate_count INTEGER DEFAULT -1"),
 ]
 
 
@@ -173,3 +189,41 @@ def update_shopify_ids(candidate_id: str, draft_id: Optional[int] = None, produc
                 (product_id, datetime.now().isoformat(), datetime.now().isoformat(), candidate_id)
             )
         conn.commit()
+
+
+# ----------------------------------------------------------------------
+# BSR 快照历史(Gate2 单品趋势: BSR 改善 = 排名上升)
+# ----------------------------------------------------------------------
+def record_bsr_snapshot(asin: str, bsr: int, sales_90d: int = 0) -> None:
+    """记录一次 BSR 快照。同一天重复抓取覆盖, 避免噪声。"""
+    if not asin or bsr <= 0:
+        return
+    today = datetime.now().strftime("%Y-%m-%d")
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO bsr_history (asin, bsr, sales_90d, captured_at)
+               VALUES (?, ?, ?, ?)""",
+            (asin, bsr, sales_90d, today),
+        )
+        conn.commit()
+
+
+def get_bsr_history(asin: str, min_span_days: int = 14) -> list[dict]:
+    """按时间顺序返回 ASIN 的 BSR 历史; 只返回跨度足够(≥min_span_days)的记录。
+
+    返回 [{asin, bsr, sales_90d, captured_at}, ...], 不足 2 条或跨度不够返回 []。
+    """
+    if not asin:
+        return []
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT asin, bsr, sales_90d, captured_at FROM bsr_history WHERE asin = ? ORDER BY captured_at ASC",
+            (asin,),
+        ).fetchall()
+    if len(rows) < 2:
+        return []
+    from datetime import date
+    dates = [date.fromisoformat(r["captured_at"]) for r in rows]
+    if (dates[-1] - dates[0]).days < min_span_days:
+        return []
+    return [dict(r) for r in rows]

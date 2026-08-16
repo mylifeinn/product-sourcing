@@ -22,6 +22,10 @@ class RawProductData:
     longtail_keywords: List[dict] = field(default_factory=list)
     google_trends_yoy_pct: float = 0.0
     tiktok_hashtag_growth_pct: float = 0.0
+    # Amazon 单品数据 [REAL]
+    asin: str = ""  # Amazon ASIN, 用于 BSR 历史追踪
+    amazon_bsr: int = 0  # Best Sellers Rank(详情页 REAL)
+    amazon_result_count: int = 0  # niche 搜索结果总数(搜索页 REAL, volume 代理)
     # Competitor data
     competitor_sales_90d: int = 0
     competitor_reviews: int = 0

@@ -23,6 +23,9 @@ class ProductCandidate:
     # Gate 2: Trend
     google_trends_yoy_pct: float = 0.0
     tiktok_hashtag_growth_pct: float = 0.0
+    # Amazon 单品趋势数据 [REAL]
+    amazon_bsr: int = 0  # Best Sellers Rank(详情页 REAL)
+    amazon_result_count: int = 0  # niche 搜索结果总数(搜索页 REAL, Gate1 volume 代理)
     
     # Gate 3: Margin
     wholesale_price_usd: float = 0.0
@@ -45,6 +48,7 @@ class ProductCandidate:
     # Gate 6: Uniqueness
     uniqueness_passed: bool = False
     competitor_urls: list[str] = field(default_factory=list)
+    amazon_duplicate_count: int = -1  # Amazon 前3页同款数(-1=未检测, >=0=REAL 检测结果)
     
     # Gate 7: Seasonality
     is_evergreen: bool = True
@@ -196,6 +200,8 @@ class CandidateDB(BaseModel):
     longtail_keywords: str  # JSON
     google_trends_yoy_pct: float
     tiktok_hashtag_growth_pct: float
+    amazon_bsr: int
+    amazon_result_count: int
     wholesale_price_usd: float
     estimated_retail_price_usd: float
     estimated_shipping_usd: float
@@ -210,6 +216,7 @@ class CandidateDB(BaseModel):
     supplier_contact: str
     uniqueness_passed: bool
     competitor_urls: str  # JSON
+    amazon_duplicate_count: int
     is_evergreen: bool
     seasonal_peak_window_days: int
     prep_lead_time_days: int
@@ -249,6 +256,8 @@ class CandidateDB(BaseModel):
             longtail_keywords=json.dumps(c.longtail_keywords, ensure_ascii=False),
             google_trends_yoy_pct=c.google_trends_yoy_pct,
             tiktok_hashtag_growth_pct=c.tiktok_hashtag_growth_pct,
+            amazon_bsr=c.amazon_bsr,
+            amazon_result_count=c.amazon_result_count,
             wholesale_price_usd=c.wholesale_price_usd,
             estimated_retail_price_usd=c.estimated_retail_price_usd,
             estimated_shipping_usd=c.estimated_shipping_usd,
@@ -263,6 +272,7 @@ class CandidateDB(BaseModel):
             supplier_contact=c.supplier_contact,
             uniqueness_passed=c.uniqueness_passed,
             competitor_urls=json.dumps(c.competitor_urls),
+            amazon_duplicate_count=c.amazon_duplicate_count,
             is_evergreen=c.is_evergreen,
             seasonal_peak_window_days=c.seasonal_peak_window_days,
             prep_lead_time_days=c.prep_lead_time_days,
@@ -302,6 +312,8 @@ class CandidateDB(BaseModel):
         c.longtail_keywords = json.loads(self.longtail_keywords)
         c.google_trends_yoy_pct = self.google_trends_yoy_pct
         c.tiktok_hashtag_growth_pct = self.tiktok_hashtag_growth_pct
+        c.amazon_bsr = self.amazon_bsr
+        c.amazon_result_count = self.amazon_result_count
         c.wholesale_price_usd = self.wholesale_price_usd
         c.estimated_retail_price_usd = self.estimated_retail_price_usd
         c.estimated_shipping_usd = self.estimated_shipping_usd
@@ -316,6 +328,7 @@ class CandidateDB(BaseModel):
         c.supplier_contact = self.supplier_contact
         c.uniqueness_passed = self.uniqueness_passed
         c.competitor_urls = json.loads(self.competitor_urls)
+        c.amazon_duplicate_count = self.amazon_duplicate_count
         c.is_evergreen = self.is_evergreen
         c.seasonal_peak_window_days = self.seasonal_peak_window_days
         c.prep_lead_time_days = self.prep_lead_time_days

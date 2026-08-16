@@ -13,6 +13,7 @@ from __future__ import annotations
 """
 
 import asyncio
+import difflib
 import json
 import random
 import re
@@ -70,6 +71,9 @@ class PublicFetcher:
                 niche=niche,
                 source=comp["source"],
                 source_url=comp["url"],
+                asin=comp.get("asin", ""),
+                amazon_bsr=comp.get("bsr", 0),
+                amazon_result_count=comp.get("result_count", 0),
                 wholesale_price_cny=0.0,  # 稍后由 CostEstimator 反推(ESTIMATED)
                 weight_g=comp.get("weight_g", 0.0),
                 dimensions_cm=comp.get("dimensions_cm", (0.0, 0.0, 0.0)),
@@ -143,6 +147,26 @@ class PublicFetcher:
                     )
                 except Exception:
                     pass
+
+                # 搜索结果总数(REAL, Gate1 volume 代理): "over 2,000 results" / "300 results"
+                result_count = 0
+                try:
+                    rc_el = await page.query_selector('span.a-color-state.a-text-bold')
+                    if rc_el:
+                        rc_text = (await rc_el.inner_text()).strip()
+                        m = re.search(r'([\d,]+(?:\.\d+)?[KMB]?)\s*results?', rc_text, re.I)
+                        if m:
+                            result_count = self._parse_compact_number(m.group(1))
+                except Exception:
+                    pass
+                if not result_count:
+                    try:
+                        body_text = await page.inner_text('body')
+                        m = re.search(r'of\s+(?:over\s+)?([\d,]+(?:\.\d+)?[KMB]?)\s*results?', body_text, re.I)
+                        if m:
+                            result_count = self._parse_compact_number(m.group(1))
+                    except Exception:
+                        pass
 
                 items = await page.query_selector_all('[data-component-type="s-search-result"]')
                 if not items:
@@ -235,6 +259,7 @@ class PublicFetcher:
                             "source": "amazon",
                             "est_sales_90d": est_sales_90d,
                             "sales_method": sales_method,
+                            "result_count": result_count,
                         })
                     except Exception:
                         continue
@@ -453,13 +478,23 @@ class PublicFetcher:
                     elif recent > 0 and older == 0:
                         yoy_pct = 100.0  # 旧期无数据, 近期有 → 新兴趋势
 
-            # 上升相关词(REAL, 来自 Trends)
+            # 上升相关词(REAL, 来自 Trends) — 429 限流频繁, 重试退避
             rising_kws = []
-            try:
-                related = pytrends.related_queries()
-                if related and niche in related and related[niche].get('rising') is not None:
-                    rising_df = related[niche]['rising']
-                    if hasattr(rising_df, 'to_dict'):
+            related = None
+            for attempt in range(3):
+                try:
+                    related = pytrends.related_queries()
+                    break
+                except Exception as e:
+                    print(f"[Trends] related_queries attempt {attempt+1}/3 failed: {e}")
+                    if attempt < 2:
+                        await asyncio.sleep(5 * (attempt + 1))  # 5s, 10s
+            if related and niche in related:
+                r = related[niche]
+                if isinstance(r, dict):
+                    # rising(上升词, 趋势信号); top(相关词, 仅作长尾词池, 不触发趋势)
+                    rising_df = r.get("rising")
+                    if rising_df is not None and hasattr(rising_df, "to_dict") and not rising_df.empty:
                         for _, row in rising_df.head(10).iterrows():
                             rising_kws.append({
                                 "keyword": str(row.get("query", "")),
@@ -470,8 +505,20 @@ class PublicFetcher:
                                 "kd_provenance": "MISSING",
                                 "trending_provenance": "REAL",
                             })
-            except Exception as e:
-                print(f"[Trends] related_queries failed: {e}")
+                    else:
+                        # 无 rising 数据(短语搜索量不足) → 用 top 相关词补长尾池
+                        top_df = r.get("top")
+                        if top_df is not None and hasattr(top_df, "to_dict") and not top_df.empty:
+                            for _, row in top_df.head(10).iterrows():
+                                rising_kws.append({
+                                    "keyword": str(row.get("query", "")),
+                                    "volume": 0,
+                                    "kd": 0,
+                                    "trending_value": 0.0,  # top 词无趋势值, 不触发通道2
+                                    "volume_provenance": "MISSING",
+                                    "kd_provenance": "MISSING",
+                                    "trending_provenance": "REAL",
+                                })
 
             result = {
                 "yoy_pct": round(yoy_pct, 1),
@@ -505,6 +552,9 @@ class PublicFetcher:
                 data = json.loads(TRENDS_CACHE_FILE.read_text())
                 entry = data.get(niche)
                 if entry and time.time() - entry.get("ts", 0) < TRENDS_CACHE_TTL:
+                    # 上升词为空时缓存可能不完整(上次抓取失败) → 只信任 1 小时
+                    if entry.get("rising_empty") and time.time() - entry.get("ts", 0) > 3600:
+                        return None
                     return entry.get("data")
         except Exception:
             pass
@@ -515,7 +565,11 @@ class PublicFetcher:
             data = {}
             if TRENDS_CACHE_FILE.exists():
                 data = json.loads(TRENDS_CACHE_FILE.read_text())
-            data[niche] = {"ts": time.time(), "data": result}
+            data[niche] = {
+                "ts": time.time(),
+                "data": result,
+                "rising_empty": not bool(result.get("rising_kws")),
+            }
             TRENDS_CACHE_FILE.write_text(json.dumps(data, ensure_ascii=False))
         except Exception:
             pass
@@ -525,3 +579,128 @@ async def fetch_niche_public(niche: str, limit: int = 20) -> List[RawProductData
     """入口函数,供 pipeline 调用"""
     fetcher = PublicFetcher()
     return await fetcher.fetch(niche, limit)
+
+
+# ----------------------------------------------------------------------
+# Gate 6: Amazon 同款检测(REAL)
+# 在 Amazon 搜索候选标题核心词, 统计前 3 页同款数(排除候选自身 ASIN)。
+# TEMU/SHEIN 因登录墙无法自动检测, 保留人工审核。
+# ----------------------------------------------------------------------
+_TITLE_STOPWORDS = {
+    "for", "with", "and", "the", "of", "to", "in", "on", "at", "by", "a", "an",
+    "men", "women", "womens", "mens", "kids", "child", "children", "baby",
+    "gift", "gifts", "home", "office", "travel", "new", "hot", "best", "plus",
+    "pro", "mini", "max", "set", "pack", "upgrade", "upgraded", "large",
+    "small", "portable", "adjustable", "rechargeable", "wireless", "electric",
+    "usb", "type", "cable", "cord", "decor", "ideal", "perfect", "great",
+    "fits", "made", "compatible", "accessory", "accessories", "personal",
+    "friends", "family", "dad", "mom", "mother", "father", "husband", "wife",
+}
+
+
+def _normalize_title_for_match(title: str) -> str:
+    t = (title or "").lower()
+    t = re.sub(r'[^\w\s]', ' ', t)
+    t = re.sub(r'\b\d+[a-z]?\b', ' ', t)  # 数字型号/规格
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t
+
+
+def _extract_search_query(title: str) -> str:
+    """从标题提取核心搜索词: 去停用词/型号, 取前 4 个词"""
+    words = [
+        w for w in _normalize_title_for_match(title).split()
+        if w not in _TITLE_STOPWORDS and len(w) >= 3
+    ]
+    return " ".join(words[:4]) or (title or "").strip()
+
+
+def _title_similarity(a: str, b: str) -> float:
+    """同款相似度: token Jaccard 与 SequenceMatcher 取较大值"""
+    wa = set(_normalize_title_for_match(a).split())
+    wb = set(_normalize_title_for_match(b).split())
+    jac = len(wa & wb) / len(wa | wb) if wa and wb else 0.0
+    ratio = difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
+    return max(jac, ratio)
+
+
+def _extract_asin(url_or_text: str) -> str:
+    m = re.search(r'/dp/([A-Z0-9]{10})', url_or_text or "")
+    return m.group(1) if m else ""
+
+
+async def check_amazon_duplicates_batch(
+    candidates: list,
+    max_check: int = 10,
+    concurrency: int = 2,
+    pages: int = 3,
+    similarity_threshold: float = 0.75,
+) -> None:
+    """对候选在 Amazon 搜索前 pages 页, 统计同款数(排除自身), 写回 amazon_duplicate_count。
+
+    -1 保留 = 检测失败/未检测(score 层标数据不足)。
+    每个候选 ~pages 次页面加载, 限速防反爬; 只检测前 max_check 个。
+    """
+    targets = [c for c in candidates if c.title][:max_check]
+    if not targets:
+        return
+
+    fetcher = PublicFetcher()
+    sem = asyncio.Semaphore(concurrency)
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True, args=fetcher._browser_launch_args())
+        context, warmup = await fetcher._new_amazon_context(browser)
+        await warmup.close()
+
+        async def check_one(cand) -> None:
+            async with sem:
+                self_asin = _extract_asin(cand.competitor_urls[0] if cand.competitor_urls else "")
+                query = _extract_search_query(cand.title)
+                match_count = 0
+                try:
+                    for page_no in range(1, pages + 1):
+                        url = f"https://www.amazon.com/s?k={quote_plus(query)}&page={page_no}"
+                        page = await context.new_page()
+                        try:
+                            await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                            try:
+                                await page.wait_for_selector(
+                                    '[data-component-type="s-search-result"], .s-result-item',
+                                    timeout=12000,
+                                )
+                            except Exception:
+                                pass
+                            items = await page.query_selector_all('[data-component-type="s-search-result"]')
+                            if not items:
+                                items = await page.query_selector_all('.s-result-item[data-asin]')
+                            for item in items:
+                                try:
+                                    hit_title = ""
+                                    for sel in ['h2 a span', 'h2 .a-text-normal', '.a-size-base-plus']:
+                                        el = await item.query_selector(sel)
+                                        if el:
+                                            hit_title = (await el.inner_text()).strip()
+                                            if hit_title:
+                                                break
+                                    if not hit_title:
+                                        continue
+                                    href_el = await item.query_selector('h2 a, .a-link-normal[href*="/dp/"]')
+                                    href = await href_el.get_attribute('href') if href_el else ""
+                                    hit_asin = _extract_asin(href)
+                                    if hit_asin and hit_asin == self_asin:
+                                        continue  # 候选自身, 不算同款
+                                    if _title_similarity(cand.title, hit_title) >= similarity_threshold:
+                                        match_count += 1
+                                except Exception:
+                                    continue
+                        finally:
+                            await page.close()
+                        await asyncio.sleep(1.5)  # 页间限速
+                    cand.amazon_duplicate_count = match_count
+                except Exception as e:
+                    print(f"[Amazon dup-check] {cand.id} failed: {e}")
+                    cand.amazon_duplicate_count = -1  # 检测失败 = 数据不足
+
+        await asyncio.gather(*[check_one(c) for c in targets])
+        await browser.close()

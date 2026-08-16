@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import re
 from typing import List
 from sourcing.models import ProductCandidate
 from sourcing.config import get_config
+from sourcing.database import get_bsr_history
 
 
 def _gate_detail(gates: dict, name: str, detail: str) -> dict:
@@ -28,16 +30,19 @@ def score_candidate(candidate: ProductCandidate) -> ProductCandidate:
     # ------------------------------------------------------------------
     # Gate 1: Pain Point Keywords(痛点关键词)
     # 免费模式: Google Suggest 关键词 REAL, 但 volume/KD 无免费 API → MISSING。
-    # 判定: 有真实 volume/KD 时严格判定; 全部缺失时用
-    #       "真实长尾关键词 ≥3 且存在真实趋势信号(上升词/正YoY)" 宽松判定。
+    # 判定优先级:
+    #   1. 有真实 volume/KD → 严格判定
+    #   2. 无 volume 但有 Amazon 搜索结果总数(REAL volume 代理, 与月搜索量强相关)
+    #      → result_count ≥ min_monthly_search 且长尾词数达标 → 通过; 否则不通过
+    #   3. 全缺失 → 宽松判定(真实关键词数 + 真实趋势信号), 标注需复核
     # ------------------------------------------------------------------
     longtail = candidate.longtail_keywords or []
     has_real_volume = any(kw.get("volume_provenance") not in (None, "", "MISSING", "MOCK") for kw in longtail)
+    min_words = gates.gate_1_pain_point_keywords.get("min_longtail_keywords", 3)
+    min_vol = gates.gate_1_pain_point_keywords.get("min_monthly_search", 500)
+    max_kd = gates.gate_1_pain_point_keywords.get("max_keyword_difficulty", 30)
 
     if has_real_volume:
-        min_words = gates.gate_1_pain_point_keywords.get("min_longtail_keywords", 3)
-        min_vol = gates.gate_1_pain_point_keywords.get("min_monthly_search", 500)
-        max_kd = gates.gate_1_pain_point_keywords.get("max_keyword_difficulty", 30)
         qualifying = [
             kw for kw in longtail
             if kw.get("volume", 0) >= min_vol
@@ -46,7 +51,16 @@ def score_candidate(candidate: ProductCandidate) -> ProductCandidate:
         results["gate_1"] = len(qualifying) >= min_words
         _gate_detail(results, "gate_1",
                      f"{len(qualifying)}/{min_words} 词达标 (vol≥{min_vol}, kd≤{max_kd}) [REAL]")
-    elif len(longtail) >= gates.gate_1_pain_point_keywords.get("min_longtail_keywords", 3) and (
+    elif candidate.amazon_result_count > 0:
+        # volume 代理: Amazon 搜索结果总数是 REAL 且与搜索量强相关
+        count_ok = candidate.amazon_result_count >= min_vol
+        kws_ok = len(longtail) >= min_words
+        results["gate_1"] = count_ok and kws_ok
+        _gate_detail(results, "gate_1",
+                     f"Amazon 搜索词结果 {candidate.amazon_result_count} (代理 vol≥{min_vol}: "
+                     f"{'✅' if count_ok else '❌'}), 长尾词 {len(longtail)}/{min_words} "
+                     "[volume=REAL代理, 长尾词=REAL]")
+    elif len(longtail) >= min_words and (
         candidate.google_trends_yoy_pct > 0 or candidate.tiktok_hashtag_growth_pct > 0
     ):
         # 免费模式宽松判定: 真实关键词数 + 真实趋势信号
@@ -57,19 +71,78 @@ def score_candidate(candidate: ProductCandidate) -> ProductCandidate:
     else:
         results["gate_1"] = False
         _gate_detail(results, "gate_1",
-                     f"长尾词 {len(longtail)} 个, 无趋势信号 → 不通过")
+                     f"长尾词 {len(longtail)} 个, 无 volume/结果数/趋势信号 → 不通过")
 
     # ------------------------------------------------------------------
-    # Gate 2: Trend(趋势)
+    # Gate 2: Trend(趋势) — 多通道解耦
+    # 通道1(REAL): 头词 Google Trends YoY ≥ 20%
+    # 通道2(REAL): Trends rising queries 中显著上升长尾词 ≥ N 个(头词跌但长尾涨 → 过)
+    # 通道3(REAL): BSR 快照历史改善 ≥ 30%(单品排名上升 → 过; 恶化 → 明确不通过)
+    # 数据缺失(无趋势信号、无上升词、无 BSR 历史) → None, 需人工
     # ------------------------------------------------------------------
-    trend_pass = (
-        candidate.google_trends_yoy_pct >= gates.gate_2_trend.get("google_trends_90d_yoy_min_pct", 20)
-        or candidate.tiktok_hashtag_growth_pct >= gates.gate_2_trend.get("tiktok_hashtag_7d_growth_min_pct", 50)
-    )
-    results["gate_2"] = trend_pass
-    _gate_detail(results, "gate_2",
-                 f"Google Trends YoY {candidate.google_trends_yoy_pct:.1f}% "
-                 f"(需≥{gates.gate_2_trend.get('google_trends_90d_yoy_min_pct', 20)}%) [REAL]")
+    trend_cfg = gates.gate_2_trend
+    yoy_min = trend_cfg.get("google_trends_90d_yoy_min_pct", 20)
+    min_rising_kws = trend_cfg.get("min_rising_keywords", 2)
+    min_rising_val = trend_cfg.get("min_rising_value", 100)
+    bsr_improve_pct = trend_cfg.get("bsr_improvement_pct", 30) / 100.0
+    bsr_min_span = trend_cfg.get("bsr_min_span_days", 14)
+
+    yoy = candidate.google_trends_yoy_pct
+    rising_kws = [
+        kw for kw in (candidate.longtail_keywords or [])
+        if kw.get("trending_provenance") == "REAL"
+    ]
+    significant_rising = [
+        kw for kw in rising_kws
+        if kw.get("trending_value", 0) >= min_rising_val
+    ]
+
+    if yoy >= yoy_min:
+        results["gate_2"] = True
+        _gate_detail(results, "gate_2",
+                     f"头词 Google Trends YoY {yoy:.1f}% ≥ {yoy_min}% [REAL]")
+    elif len(significant_rising) >= min_rising_kws:
+        results["gate_2"] = True
+        _gate_detail(results, "gate_2",
+                     f"头词 YoY {yoy:.1f}%(未达{yoy_min}%), 但上升长尾词 "
+                     f"{len(significant_rising)}/{min_rising_kws} 个显著上涨 "
+                     f"(值≥{min_rising_val}) [REAL-长尾通道]")
+    else:
+        # BSR 历史通道(需跨日快照, cron 跑几天后自动生效)
+        asin = ""
+        if candidate.competitor_urls:
+            m = re.search(r'/dp/([A-Z0-9]{10})', candidate.competitor_urls[0])
+            asin = m.group(1) if m else ""
+        bsr_history = get_bsr_history(asin, min_span_days=bsr_min_span) if asin else []
+
+        if len(bsr_history) >= 2:
+            old_bsr = bsr_history[0]["bsr"]
+            new_bsr = bsr_history[-1]["bsr"]
+            improvement = (old_bsr - new_bsr) / old_bsr if old_bsr > 0 else 0.0
+            results["gate_2"] = improvement >= bsr_improve_pct
+            _gate_detail(results, "gate_2",
+                         f"BSR {old_bsr}→{new_bsr} 改善 {improvement*100:.0f}% "
+                         f"(需≥{bsr_improve_pct*100:.0f}%) [REAL-BSR历史]")
+        elif yoy < 0:
+            # 明确下跌: 头词跌且无显著上升词/BSR 改善
+            results["gate_2"] = False
+            _gate_detail(results, "gate_2",
+                         f"头词 YoY {yoy:.1f}%(下跌), 上升词 {len(significant_rising)} 个, "
+                         "无 BSR 历史 → 不通过 [REAL]")
+        elif yoy > 0 and not rising_kws:
+            results["gate_2"] = False
+            _gate_detail(results, "gate_2",
+                         f"头词 YoY {yoy:.1f}% 但未达 {yoy_min}%, 无上升词数据 → 不通过 [REAL]")
+        elif yoy == 0 and not rising_kws:
+            # 无任何趋势信号 → 数据不足, 不武断判定
+            results["gate_2"] = None
+            _gate_detail(results, "gate_2",
+                         "Trends 数据缺失(YoY=0 且无上升词) → 数据不足, 需人工 [MISSING]")
+        else:
+            results["gate_2"] = False
+            _gate_detail(results, "gate_2",
+                         f"头词 YoY {yoy:.1f}%(未达{yoy_min}%), 上升词 {len(significant_rising)} 个 "
+                         f"(需≥{min_rising_kws}) → 不通过 [REAL]")
 
     # ------------------------------------------------------------------
     # Gate 3: Margin(毛利, ESTIMATED - 基于真实竞品价反推)
@@ -128,16 +201,22 @@ def score_candidate(candidate: ProductCandidate) -> ProductCandidate:
 
     # ------------------------------------------------------------------
     # Gate 6: Uniqueness(独特性)
-    # 免费模式无 TEMU/SHEIN 反爬数据, 无法真实验证前3页无同款 → 数据不足。
-    # 仅当 uniqueness_passed 被显式设置(如人工审核)才通过。
+    # Amazon: 自动同款检测(REAL, 前3页标题相似度匹配, 排除自身 ASIN)。
+    # TEMU/SHEIN 登录墙无法自动检测 → 人工确认; uniqueness_passed 可人工置 True。
     # ------------------------------------------------------------------
-    if candidate.uniqueness_passed:
+    if candidate.amazon_duplicate_count >= 0:
+        max_match = gates.gate_6_uniqueness.get("max_matching_pages", 3)
+        results["gate_6"] = candidate.amazon_duplicate_count <= max_match
+        _gate_detail(results, "gate_6",
+                     f"Amazon 前3页同款 {candidate.amazon_duplicate_count} 个 (阈值≤{max_match}) "
+                     "[REAL-自动检测]; TEMU/SHEIN 需人工")
+    elif candidate.uniqueness_passed:
         results["gate_6"] = True
         _gate_detail(results, "gate_6", "人工确认无同款")
     else:
         results["gate_6"] = None
         _gate_detail(results, "gate_6",
-                     "免费模式无法自动检测 TEMU/SHEIN 同款 → 需人工在审核阶段确认 [MISSING]")
+                     "Amazon 同款检测未执行且无人工确认 → 数据不足 [MISSING]")
 
     # ------------------------------------------------------------------
     # Gate 7: Seasonality(长青/季节)
@@ -235,6 +314,9 @@ def build_provenance(c: ProductCandidate) -> dict[str, str]:
         "REAL" if any(k.get("volume_provenance") == "REAL" for k in c.longtail_keywords)
         else "MISSING"  # 无免费搜索量 API
     )
+    p["amazon_result_count"] = "REAL" if c.amazon_result_count > 0 else "MISSING"
+    p["amazon_bsr"] = "REAL" if c.amazon_bsr > 0 else "MISSING"
+    p["amazon_uniqueness"] = "REAL" if c.amazon_duplicate_count >= 0 else "MISSING"
     p["weight_dimensions"] = (
         "REAL" if c.weight_g > 0 and all(d > 0 for d in c.dimensions_cm) else "MISSING"
     )

@@ -5,11 +5,11 @@ from typing import List, Optional
 
 from sourcing.models import ProductCandidate
 from sourcing.config import get_config
-from sourcing.database import upsert_candidate
+from sourcing.database import upsert_candidate, record_bsr_snapshot
 from sourcing.pipeline.cost_estimator import CostEstimator
 from sourcing.pipeline.raw_data import RawProductData
 from sourcing.pipeline.wholesale_fetch import fetch_wholesale_offers
-from sourcing.pipeline.public_fetch import fetch_niche_public, PublicFetcher
+from sourcing.pipeline.public_fetch import fetch_niche_public, PublicFetcher, check_amazon_duplicates_batch
 
 
 class BaseFetcher:
@@ -198,6 +198,8 @@ async def fetch_niche(niche: str, source: str = "public", limit: int = 20) -> Li
             longtail_keywords=raw.longtail_keywords or [],
             google_trends_yoy_pct=raw.google_trends_yoy_pct,
             tiktok_hashtag_growth_pct=raw.tiktok_hashtag_growth_pct,
+            amazon_bsr=raw.amazon_bsr,
+            amazon_result_count=raw.amazon_result_count,
             wholesale_price_usd=round(wholesale_price_usd, 2),
             weight_g=raw.weight_g,
             dimensions_cm=raw.dimensions_cm,
@@ -220,6 +222,17 @@ async def fetch_niche(niche: str, source: str = "public", limit: int = 20) -> Li
             source=raw.source,
         )
         candidates.append(candidate)
+
+    # BSR 快照: 同 ASIN 同日覆盖, 跨日累积 → Gate2 单品趋势(BSR 改善=上升)
+    for raw in raw_products:
+        if raw.asin and raw.amazon_bsr > 0:
+            record_bsr_snapshot(raw.asin, raw.amazon_bsr, raw.competitor_sales_90d)
+
+    # Gate 6: Amazon 同款检测(REAL, 前3页; 只测前 max_check 个, 限速防反爬)
+    try:
+        await check_amazon_duplicates_batch(candidates, max_check=10, concurrency=2)
+    except Exception as e:
+        print(f"[dup-check] batch failed: {e}")
 
     return candidates
 
