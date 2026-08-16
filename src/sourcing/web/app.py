@@ -5,7 +5,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
-from fastapi import FastAPI, Request, Query
+from fastapi import FastAPI, Request, Query, Form
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -58,8 +58,12 @@ class GateResult(BaseModel):
 
 
 @app.get("/", response_class=HTMLResponse)
-async def dashboard(request: Request):
-    candidates = get_all_candidates(limit=200)
+async def dashboard(
+    request: Request,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=5, le=200),
+):
+    candidates = get_all_candidates(limit=500)
     
     # Enrich and score all for display
     enriched = []
@@ -101,9 +105,19 @@ async def dashboard(request: Request):
         "approved": sum(1 for e in enriched if e["candidate"].review_status == "approved"),
     }
     
+    # Pagination
+    total_pages = max(1, (len(enriched) + per_page - 1) // per_page)
+    page = min(page, total_pages)
+    start = (page - 1) * per_page
+    page_candidates = enriched[start:start + per_page]
+    
     return render_template("dashboard.html", {
-        "candidates": enriched,
+        "candidates": page_candidates,
+        "all_count": len(enriched),
         "stats": stats,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
     })
 
 
@@ -142,13 +156,21 @@ async def candidate_detail(request: Request, candidate_id: str):
 
 
 @app.post("/candidate/{candidate_id}/review")
-async def update_review(candidate_id: str, status: str = Query(...), notes: str = Query("")):
+async def update_review(
+    candidate_id: str,
+    status: str = Form(...),
+    notes: str = Form(""),
+    page: int = Form(1),
+    per_page: int = Form(20),
+):
     from sourcing.database import update_review_status
+    from fastapi.responses import RedirectResponse
     valid_statuses = ["pending", "approved", "rejected", "waived"]
     if status not in valid_statuses:
         return {"error": "Invalid status"}
     update_review_status(candidate_id, status, notes)
-    return {"ok": True, "status": status}
+    # 提交后回到列表页(保持当前页和每页行数)
+    return RedirectResponse(url=f"/?page={page}&per_page={per_page}", status_code=303)
 
 
 @app.get("/api/candidates")
