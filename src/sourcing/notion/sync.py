@@ -91,12 +91,98 @@ class NotionSync:
             return []
     
     def bulk_upsert(self, candidates: List[ProductCandidate]) -> int:
-        """Bulk upsert candidates to Notion"""
+        """Bulk upsert candidates to Notion (按 score 降序自动编序号)"""
+        # 按 score 降序排, 同分按完整度, 序号 1,2,3...
+        ordered = sorted(
+            candidates,
+            key=lambda c: (c.total_score, c.data_completeness_pct),
+            reverse=True,
+        )
+        for i, c in enumerate(ordered, 1):
+            c.rank = i
         success = 0
-        for candidate in candidates:
+        for candidate in ordered:
             if self.upsert_candidate(candidate):
                 success += 1
         return success
+
+    def clear_database(self) -> int:
+        """清空数据库所有页面(物理删除, 供重同步去重)。返回删除数。
+
+        注意: Notion API 无批量删, 逐条 archive。数据量几百时 OK, 上千会慢。
+        """
+        if not self.client or not self.db_id:
+            return 0
+        import httpx
+
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Notion-Version": "2022-06-28",
+        }
+        deleted = 0
+        try:
+            while True:
+                resp = httpx.post(
+                    f"https://api.notion.com/v1/databases/{self.db_id}/query",
+                    headers=headers,
+                    json={"page_size": 100},
+                    timeout=30,
+                )
+                rows = resp.json().get("results", [])
+                if not rows:
+                    break
+                for row in rows:
+                    r = httpx.patch(
+                        f"https://api.notion.com/v1/pages/{row['id']}",
+                        headers={**headers, "Content-Type": "application/json"},
+                        json={"archived": True},
+                        timeout=30,
+                    )
+                    if r.status_code == 200:
+                        deleted += 1
+                if len(rows) < 100:
+                    break
+        except Exception as e:
+            print(f"clear_database error: {e}")
+        return deleted
+
+    def sync_all(self, candidates: List[ProductCandidate], clear_first: bool = False) -> dict:
+        """清空(可选) + 全量同步。返回统计。"""
+        result = {"cleared": 0, "synced": 0, "total": len(candidates)}
+        if clear_first:
+            result["cleared"] = self.clear_database()
+        result["synced"] = self.bulk_upsert(candidates)
+        return result
+
+    @staticmethod
+    def dedup_by_asin(candidates: List[ProductCandidate]) -> List[ProductCandidate]:
+        """按 ASIN 去重: 同一 ASIN 保留 score 最高者(同分保留最新)。"""
+        import re as _re
+
+        best: dict[str, ProductCandidate] = {}
+        ordered = sorted(
+            candidates,
+            key=lambda c: (c.total_score, c.data_completeness_pct, c.created_at),
+            reverse=True,
+        )
+        for c in ordered:
+            asin = ""
+            if c.competitor_urls:
+                m = _re.search(r"/dp/([A-Z0-9]{10})", c.competitor_urls[0])
+                asin = m.group(1) if m else ""
+            if asin:
+                if asin not in best:
+                    best[asin] = c
+            else:
+                best.setdefault(c.id, c)
+        return list(best.values())
+
+    def sync_all_deduped(self, clear_first: bool = False) -> dict:
+        """从本地 DB 读全部候选 → ASIN 去重 → 清空(可选) → 同步。一步到位。"""
+        from sourcing.database import get_all_candidates
+
+        candidates = self.dedup_by_asin(get_all_candidates(limit=2000))
+        return self.sync_all(candidates, clear_first=clear_first)
 
     # ------------------------------------------------------------------
     # 自动创建审核数据库(用户只需提供 token + 父页面, 不用手动建库)
@@ -106,6 +192,7 @@ class NotionSync:
         """审核数据库完整属性 schema(与 models.to_notion_properties 对齐)"""
         return {
             "Candidate ID": {"title": {}},
+            "序号": {"number": {}},
             "产品标题": {"rich_text": {}},
             "细分品类": {"select": {"options": []}},
             "痛点关键词": {"multi_select": {"options": []}},

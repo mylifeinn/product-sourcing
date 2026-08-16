@@ -86,6 +86,7 @@ class ProductCandidate:
     # Review
     review_status: str = "pending"  # pending, approved, rejected, waived
     review_notes: str = ""
+    rank: int = 0  # Notion 同步序号(按 score 降序) — 不入库, 仅同步用
     
     # Shopify
     shopify_draft_id: Optional[int] = None
@@ -104,6 +105,7 @@ class ProductCandidate:
 
         return {
             "Candidate ID": {"title": [{"text": {"content": self.id}}]},
+            "序号": {"number": self.rank or 0},
             "产品标题": {"rich_text": [{"text": {"content": self.title}}]},
             "细分品类": {"select": {"name": self.niche}},
             "痛点关键词": {"multi_select": [{"name": kw} for kw in self.pain_point_keywords]},
