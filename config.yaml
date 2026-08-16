@@ -177,6 +177,37 @@ seed_niches:
   # --- 出行 ---
   - "bike phone mount waterproof"
   - "book stand for reading hands free"
+  # --- 家居/收纳 (扩容) ---
+  - "under desk cable management tray"
+  - "command hooks heavy duty"
+  - "vacuum storage bags space saver"
+  - "laundry hamper collapsible"
+  - "shoe rack stackable"
+  # --- 厨房/餐饮 (扩容) ---
+  - "electric spice grinder small"
+  - "garlic press stainless steel"
+  - "salad chopper bowl"
+  - "collapsible dish rack"
+  - "kitchen scale digital small"
+  # --- 办公/健康 (扩容) ---
+  - "wrist rest mouse pad gel"
+  - "foot rest under desk"
+  - "lumbar support pillow for office chair"
+  - "carpal tunnel wrist brace"
+  # --- 宠物 (扩容) ---
+  - "dog poop bag dispenser"
+  - "cat scratching pad corrugated"
+  - "pet grooming brush self cleaning"
+  # --- 个人护理 (扩容) ---
+  - "electric callus remover"
+  - "nose hair trimmer rechargeable"
+  - "insect bite healer device"
+  - "hair removal tool facial"
+  # --- 户外/运动 (扩容) ---
+  - "resistance bands set with handles"
+  - "foam roller for back pain"
+  - "massage gun mini"
+  - "hiking water bottle clip"
 
 # Brand config for SEO template (from Q22)
 brand:

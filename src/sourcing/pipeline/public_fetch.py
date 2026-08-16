@@ -279,8 +279,8 @@ class PublicFetcher:
         if not targets:
             return products
 
-        # 详情页并发但限速(Amazon 反爬敏感)
-        sem = asyncio.Semaphore(2)
+        # 详情页并发但限速(Amazon 反爬敏感 + CPU 控制, 1 并发最稳)
+        sem = asyncio.Semaphore(1)
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=self._browser_launch_args())
             context, warmup_page = await self._new_amazon_context(browser)

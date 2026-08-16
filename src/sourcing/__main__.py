@@ -143,8 +143,10 @@ def fetch_all(
     source: str = typer.Option("public", "--source", "-s", help="Data source"),
     limit: int = typer.Option(8, "--limit", "-l", help="Max products per niche"),
     start_from: Optional[str] = typer.Option(None, "--start-from", help="Resume from this niche (inclusive)"),
+    sleep_between: int = typer.Option(10, "--sleep", help="Seconds to sleep between niches (CPU 喘息, 防长期100%)"),
 ):
     """Fetch candidates for ALL seed niches from config (多样化批量选品)"""
+    import time as _time
     config = get_config()
     niches = list(config.seed_niches)
     if not niches:
@@ -160,6 +162,7 @@ def fetch_all(
 
     console.print(f"[bold blue]Fetching {len(niches)} niches × up to {limit} products[/bold blue]")
     console.print(f"Niches: {', '.join(niches)}")
+    console.print(f"[dim]每 niche 间隔 {sleep_between}s 限流(防 CPU 长期 100%)[/dim]")
 
     all_candidates = []
     for i, niche in enumerate(niches, 1):
@@ -197,6 +200,11 @@ def fetch_all(
         except Exception as e:
             console.print(f"  [red]✗ {niche} failed: {e}[/red]")
             continue
+
+        # CPU 喘息: 每 niche 之间 sleep(最后一个不睡)
+        if i < len(niches) and sleep_between > 0:
+            console.print(f"  [dim]sleeping {sleep_between}s...[/dim]")
+            _time.sleep(sleep_between)
 
     if not all_candidates:
         console.print("[red]No candidates across all niches[/red]")
