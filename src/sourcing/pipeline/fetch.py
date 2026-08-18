@@ -220,6 +220,10 @@ async def fetch_niche(niche: str, source: str = "public", limit: int = 20) -> Li
             estimated_repurchase_cycle_days=raw.estimated_repurchase_cycle_days,
             estimated_ltv_orders=raw.estimated_ltv_orders,
             source=raw.source,
+            # Reddit signals
+            reddit_pain_points=raw.reddit_pain_points or [],
+            reddit_recommendations=raw.reddit_recommendations or [],
+            reddit_complaints=raw.reddit_complaints or [],
         )
         candidates.append(candidate)
 

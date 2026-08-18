@@ -37,6 +37,17 @@
                         <table class="table table-sm mb-0">
                             <tr><th style="width: 120px;">ID</th><td><code>{{ candidate.id }}</code></td></tr>
                             <tr><th>品类</th><td>{{ candidate.niche }}</td></tr>
+                            <tr><th>数据源</th><td>
+                                {% set src = candidate.source %}
+                                <span class="badge 
+                                    {% if src == 'amazon' %}bg-info
+                                    {% elif src == 'public' %}bg-success
+                                    {% elif src == 'real' %}bg-primary
+                                    {% elif src == 'mock' %}bg-warning text-dark
+                                    {% else %}bg-secondary{% endif %}">
+                                    {{ src }}
+                                </span>
+                            </td></tr>
                             <tr><th>总分</th><td><span class="badge {% if candidate.total_score == 100 %}bg-success{% else %}bg-danger{% endif %} fs-6">{{ candidate.total_score }}</span></td></tr>
                             <tr><th>通过门槛</th><td>{{ passed_count }} / {{ total_gates }}</td></tr>
                             <tr><th>建议零售价</th><td><strong>${{ candidate.estimated_retail_price_usd }}</strong></td></tr>
@@ -212,34 +223,83 @@
             </div>
         </div>
 
-        <!-- Review Actions -->
-        {% if candidate.review_status == 'pending' %}
+        <!-- Data Provenance / Reliability -->
         <div class="row g-3 mb-4">
             <div class="col-12">
-                <div class="card shadow-sm border-warning">
-                    <div class="card-header bg-white"><h5 class="mb-0"><i class="bi bi-clipboard-check"></i> 审核操作</h5></div>
+                <div class="card shadow-sm border-info">
+                    <div class="card-header bg-info text-white"><h5 class="mb-0"><i class="bi bi-diagram-3"></i> 数据溯源 & 可靠性 (REAL=真实抓取, ESTIMATED=模型推算, MISSING=无数据)</h5></div>
                     <div class="card-body">
-                        <form action="/candidate/{{ candidate.id }}/review" method="post" class="d-inline me-2">
-                            <input type="hidden" name="status" value="approved">
-                            <button type="submit" class="btn btn-success" onclick="return confirm('确认通过该候选品？')"><i class="bi bi-check"></i> 通过</button>
-                        </form>
-                        <form action="/candidate/{{ candidate.id }}/review" method="post" class="d-inline me-2">
-                            <input type="hidden" name="status" value="rejected">
-                            <button type="submit" class="btn btn-danger" onclick="return confirm('确认拒绝该候选品？')"><i class="bi bi-x"></i> 拒绝</button>
-                        </form>
-                        <form action="/candidate/{{ candidate.id }}/review" method="post" class="d-inline me-2">
-                            <input type="hidden" name="status" value="waived">
-                            <button type="submit" class="btn btn-info" onclick="return confirm('确认豁免通过？(不满足门槛但人工强行通过)')"><i class="bi bi-shield-exclamation"></i> 豁免通过</button>
-                        </form>
-                        <form action="/candidate/{{ candidate.id }}/review" method="post" class="d-inline">
-                            <input type="hidden" name="status" value="pending">
-                            <button type="submit" class="btn btn-secondary"><i class="bi bi-arrow-clockwise"></i> 重置待审</button>
-                        </form>
+                        {% if candidate.data_provenance %}
+                        <div class="row g-2">
+                            {% for field, prov in candidate.data_provenance.items() %}
+                            <div class="col-6 col-md-4 col-lg-3">
+                                <span class="badge 
+                                    {% if prov == 'REAL' %}bg-success
+                                    {% elif prov == 'ESTIMATED' %}bg-warning text-dark
+                                    {% else %}bg-secondary{% endif %} me-1">{{ prov }}</span>
+                                <small class="text-muted">{{ field }}</small>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        <div class="mt-2">
+                            <small class="text-muted">
+                                完整度: <strong>{{ candidate.data_completeness_pct }}%</strong> 
+                                (REAL 字段占比). 
+                                {% if candidate.needs_manual_review %}
+                                <span class="badge bg-warning text-dark ms-2"><i class="bi bi-exclamation-triangle"></i> 需人工复核</span>
+                                {% endif %}
+                            </small>
+                        </div>
+                        {% else %}
+                        <p class="text-muted mb-0">暂无数据溯源信息</p>
+                        {% endif %}
                     </div>
                 </div>
             </div>
         </div>
-        {% endif %}
+
+        <!-- Review Actions -->
+        <div class="row g-3 mb-4">
+            <div class="col-12">
+                <div class="card shadow-sm border-warning">
+                    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="bi bi-clipboard-check"></i> 审核操作</h5>
+                        <span class="badge 
+                            {% if candidate.review_status == 'approved' %}bg-success
+                            {% elif candidate.review_status == 'rejected' %}bg-danger
+                            {% elif candidate.review_status == 'waived' %}bg-info
+                            {% else %}bg-secondary{% endif %} fs-6">
+                            当前: {{ candidate.review_status }}
+                        </span>
+                    </div>
+                    <div class="card-body">
+                        <div class="d-flex flex-wrap gap-2">
+                            <form action="/candidate/{{ candidate.id }}/review" method="post" class="d-inline me-2">
+                                <input type="hidden" name="status" value="pending">
+                                <button type="submit" class="btn {% if candidate.review_status == 'pending' %}btn-outline-secondary disabled{% else %}btn-secondary{% endif %}" {% if candidate.review_status == 'pending' %}disabled{% endif %} onclick="{% if candidate.review_status != 'pending' %}return confirm('重置为待审核状态？'){% endif %}"><i class="bi bi-arrow-clockwise"></i> 待审核</button>
+                            </form>
+                            <form action="/candidate/{{ candidate.id }}/review" method="post" class="d-inline me-2">
+                                <input type="hidden" name="status" value="approved">
+                                <button type="submit" class="btn {% if candidate.review_status == 'approved' %}btn-outline-success disabled{% else %}btn-success{% endif %}" {% if candidate.review_status == 'approved' %}disabled{% endif %} onclick="{% if candidate.review_status != 'approved' %}return confirm('确认通过该候选品？'){% endif %}"><i class="bi bi-check"></i> 通过</button>
+                            </form>
+                            <form action="/candidate/{{ candidate.id }}/review" method="post" class="d-inline me-2">
+                                <input type="hidden" name="status" value="rejected">
+                                <button type="submit" class="btn {% if candidate.review_status == 'rejected' %}btn-outline-danger disabled{% else %}btn-danger{% endif %}" {% if candidate.review_status == 'rejected' %}disabled{% endif %} onclick="{% if candidate.review_status != 'rejected' %}return confirm('确认拒绝该候选品？'){% endif %}"><i class="bi bi-x"></i> 拒绝</button>
+                            </form>
+                            <form action="/candidate/{{ candidate.id }}/review" method="post" class="d-inline me-2">
+                                <input type="hidden" name="status" value="waived">
+                                <button type="submit" class="btn {% if candidate.review_status == 'waived' %}btn-outline-info disabled{% else %}btn-info{% endif %}" {% if candidate.review_status == 'waived' %}disabled{% endif %} onclick="{% if candidate.review_status != 'waived' %}return confirm('确认豁免通过？(不满足门槛但人工强行通过)'){% endif %}"><i class="bi bi-shield-exclamation"></i> 豁免通过</button>
+                            </form>
+                        </div>
+                        {% if candidate.review_notes %}
+                        <div class="mt-3 p-2 bg-light rounded">
+                            <strong>审核备注:</strong> {{ candidate.review_notes }}
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>

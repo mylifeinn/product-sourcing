@@ -78,7 +78,10 @@
         <div class="card shadow-sm">
             <div class="card-header bg-white d-flex justify-content-between align-items-center flex-wrap gap-2">
                 <h5 class="mb-0">候选品列表 (按得分 & 通过门槛数排序)</h5>
-                <div class="d-flex align-items-center gap-2">
+                <div class="d-flex align-items-center gap-2 flex-wrap">
+                    <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#fetchModal">
+                        <i class="bi bi-arrow-clockwise"></i> 手动拉取最新产品
+                    </button>
                     <label class="text-muted small mb-0">每页</label>
                     <select class="form-select form-select-sm per-page-select" id="perPageSelect" onchange="changePerPage(this.value)">
                         {% for opt in [10, 20, 50, 100] %}
@@ -97,6 +100,7 @@
                                 <th style="width: 90px;">ID</th>
                                 <th>产品标题</th>
                                 <th style="width: 110px;">品类</th>
+                                <th style="width: 90px;">数据源</th>
                                 <th style="width: 80px;">得分</th>
                                 <th style="width: 90px;">通过/总门槛</th>
                                 <th style="width: 80px;">完整度</th>
@@ -118,6 +122,18 @@
                                 </td>
                                 <td>{{ item.candidate.niche }}</td>
                                 <td>
+                                    {% set src = item.candidate.source %}
+                                    <span class="badge 
+                                        {% if src == 'amazon' %}bg-info
+                                        {% elif src == 'public' %}bg-success
+                                        {% elif src == 'real' %}bg-primary
+                                        {% elif src == 'mock' %}bg-warning text-dark
+                                        {% else %}bg-secondary{% endif %}">
+                                        {{ src }}
+                                    </span>
+                                    <br><small class="text-muted">{{ item.candidate.data_provenance|length if item.candidate.data_provenance else 0 }} 字段溯源</small>
+                                </td>
+                                <td>
                                     <span class="badge score-badge bg-{{ item.score_color }}">
                                         {{ item.candidate.total_score }}
                                     </span>
@@ -131,24 +147,36 @@
                                     </span>
                                 </td>
                                 <td>
-                                    <span class="badge {% if item.candidate.data_completeness_pct >= 70 %}bg-success{% elif item.candidate.data_completeness_pct >= 40 %}bg-warning text-dark{% else %}bg-danger{% endif %}">
+                                    <span class="badge 
+                                        {% if item.candidate.data_completeness_pct >= 70 %}bg-success
+                                        {% elif item.candidate.data_completeness_pct >= 40 %}bg-warning text-dark
+                                        {% else %}bg-danger{% endif %}">
                                         {{ item.candidate.data_completeness_pct }}%
                                     </span>
-                                    <br><small class="text-muted">REAL/估算</small>
+                                    <br><small class="text-muted">REAL字段占比</small>
+                                    {% if item.candidate.needs_manual_review %}
+                                    <br><span class="badge bg-warning text-dark" title="有数据不足的门槛需人工确认"><i class="bi bi-exclamation-triangle"></i> 需复核</span>
+                                    {% endif %}
                                 </td>
                                 <td>
                                     <span class="margin-{{ item.margin_color }}">
                                         {{ item.candidate.estimated_margin_pct }}%
                                     </span>
                                     <br><small class="text-muted">零售 ${{ item.candidate.estimated_retail_price_usd }}</small>
+                                    {% set prov = item.candidate.data_provenance.get('wholesale_price_usd', 'MISSING') %}
+                                    <br><span class="badge {% if prov == 'REAL' %}bg-success{% elif prov == 'ESTIMATED' %}bg-warning text-dark{% else %}bg-secondary{% endif %}">{{ prov }}</span>
                                 </td>
                                 <td>
                                     {{ item.candidate.weight_g|round(0) }}g
                                     <br><small>{{ item.candidate.dimensions_cm[0]|round(0) }}×{{ item.candidate.dimensions_cm[1]|round(0) }}×{{ item.candidate.dimensions_cm[2]|round(0) }}cm</small>
+                                    {% set prov = item.candidate.data_provenance.get('weight_g', 'MISSING') %}
+                                    <br><span class="badge {% if prov == 'REAL' %}bg-success{% elif prov == 'ESTIMATED' %}bg-warning text-dark{% else %}bg-secondary{% endif %}">{{ prov }}</span>
                                 </td>
                                 <td>
                                     销量 {{ item.candidate.competitor_sales_90d }}
                                     <br>评论 {{ item.candidate.competitor_reviews }}
+                                    {% set prov = item.candidate.data_provenance.get('competitor_sales_90d', 'MISSING') %}
+                                    <br><span class="badge {% if prov == 'REAL' %}bg-success{% elif prov == 'ESTIMATED' %}bg-warning text-dark{% else %}bg-secondary{% endif %}">{{ prov }}</span>
                                 </td>
                                 <td>
                                     <span class="badge 
@@ -164,26 +192,37 @@
                                         <a href="/candidate/{{ item.candidate.id }}" class="btn btn-sm btn-outline-primary">
                                             <i class="bi bi-eye"></i> 详情
                                         </a>
-                                        {% if item.candidate.review_status == 'pending' %}
                                         <form action="/candidate/{{ item.candidate.id }}/review" method="post" class="m-0">
-                                            <input type="hidden" name="status" value="approved">
                                             <input type="hidden" name="page" value="{{ page }}">
                                             <input type="hidden" name="per_page" value="{{ per_page }}">
-                                            <button type="submit" class="btn btn-sm btn-success" onclick="return confirm('确认通过？')">
+                                            {% set current = item.candidate.review_status %}
+                                            {% if current == 'pending' %}
+                                            <button type="submit" name="status" value="approved" class="btn btn-sm btn-success" onclick="return confirm('确认通过？')">
                                                 <i class="bi bi-check-lg"></i> 通过
                                             </button>
-                                        </form>
-                                        <form action="/candidate/{{ item.candidate.id }}/review" method="post" class="m-0">
-                                            <input type="hidden" name="status" value="rejected">
-                                            <input type="hidden" name="page" value="{{ page }}">
-                                            <input type="hidden" name="per_page" value="{{ per_page }}">
-                                            <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('确认拒绝？')">
+                                            <button type="submit" name="status" value="rejected" class="btn btn-sm btn-danger" onclick="return confirm('确认拒绝？')">
                                                 <i class="bi bi-x-lg"></i> 拒绝
                                             </button>
+                                            {% elif current == 'approved' %}
+                                            <button type="submit" name="status" value="rejected" class="btn btn-sm btn-danger" onclick="return confirm('确认改为拒绝？')">
+                                                <i class="bi bi-x-lg"></i> 改为拒绝
+                                            </button>
+                                            <button type="submit" name="status" value="pending" class="btn btn-sm btn-outline-secondary" onclick="return confirm('重置为待审核？')">
+                                                <i class="bi bi-arrow-clockwise"></i> 重置待审
+                                            </button>
+                                            {% elif current == 'rejected' %}
+                                            <button type="submit" name="status" value="approved" class="btn btn-sm btn-success" onclick="return confirm('确认改为通过？')">
+                                                <i class="bi bi-check-lg"></i> 改为通过
+                                            </button>
+                                            <button type="submit" name="status" value="pending" class="btn btn-sm btn-outline-secondary" onclick="return confirm('重置为待审核？')">
+                                                <i class="bi bi-arrow-clockwise"></i> 重置待审
+                                            </button>
+                                            {% elif current == 'waived' %}
+                                            <button type="submit" name="status" value="pending" class="btn btn-sm btn-outline-secondary" onclick="return confirm('重置为待审核？')">
+                                                <i class="bi bi-arrow-clockwise"></i> 重置待审
+                                            </button>
+                                            {% endif %}
                                         </form>
-                                        {% else %}
-                                        <span class="text-muted small text-center">已处理</span>
-                                        {% endif %}
                                     </div>
                                 </td>
                             </tr>
@@ -219,11 +258,210 @@
         </div>
     </div>
 
+    <!-- Legend / Key -->
+    <div class="card shadow-sm mt-3">
+        <div class="card-header bg-white"><h6 class="mb-0"><i class="bi bi-info-circle"></i> 图例说明</h6></div>
+        <div class="card-body py-2">
+            <div class="row g-2 small">
+                <div class="col-12 col-md-6">
+                    <strong>数据源:</strong>
+                    <span class="badge bg-info ms-1">amazon</span> 直接抓取 Amazon 前台页面
+                    <span class="badge bg-success ms-1">public</span> 纯公开真实数据 (Amazon+Google+Reddit, 默认推荐)
+                    <span class="badge bg-primary ms-1">real</span> 聚合真实数据源 (含批发报价, 需代理)
+                    <span class="badge bg-warning text-dark ms-1">mock</span> 仅测试用假数据
+                </div>
+                <div class="col-12 col-md-6">
+                    <strong>字段溯源:</strong>
+                    <span class="badge bg-success ms-1">REAL</span> 真实抓取/官方公开数据
+                    <span class="badge bg-warning text-dark ms-1">ESTIMATED</span> 基于真实数据的模型推算
+                    <span class="badge bg-secondary ms-1">MISSING</span> 无可用数据
+                </div>
+                <div class="col-12">
+                    <strong>完整度:</strong> REAL 字段占比 (≥70% 绿, 40-69% 黄, <40% 红). 
+                    <span class="badge bg-warning text-dark"><i class="bi bi-exclamation-triangle"></i> 需复核</span> = 有门槛数据不足需人工确认.
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Fetch Products Modal -->
+    <div class="modal fade" id="fetchModal" tabindex="-1" aria-labelledby="fetchModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="fetchModalLabel"><i class="bi bi-arrow-clockwise"></i> 手动拉取最新产品</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <form id="fetchForm">
+                    <div class="modal-body">
+                        <div class="mb-3">
+                            <label for="nicheSelect" class="form-label">选择品类 (或输入自定义)</label>
+                            <input type="text" class="form-control" id="nicheSelect" name="niche" list="seedNichesList" placeholder="输入关键词或选择预设" required autocomplete="off">
+                            <datalist id="seedNichesList">
+                                {% for n in seed_niches %}
+                                <option value="{{ n }}">{{ n }}</option>
+                                {% endfor %}
+                            </datalist>
+                            <div class="form-text">输入关键词搜索，或从预设列表选择</div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="sourceSelect" class="form-label">数据源</label>
+                            <select class="form-select" id="sourceSelect" name="source" required>
+                                {% for ds in data_sources %}
+                                {% if ds.enabled %}
+                                <option value="{{ ds.name }}" {% if ds.name == 'public' %}selected{% endif %}>{{ ds.label }}</option>
+                                {% endif %}
+                                {% endfor %}
+                            </select>
+                            <div class="form-text" id="sourceHelpText">{{ (data_sources | selectattr('name', 'equalto', 'public') | first).description if data_sources else 'Public = 纯公开真实数据 (Amazon搜索/详情页+Google Suggest/Trends+Reddit), 真实可信' }}</div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="limitInput" class="form-label">抓取数量限制</label>
+                            <input type="number" class="form-control" id="limitInput" name="limit" value="20" min="1" max="50">
+                        </div>
+                        
+                        <!-- Progress Display -->
+                        <div id="fetchProgress" class="d-none">
+                            <div class="card mb-3">
+                                <div class="card-header bg-light">
+                                    <strong id="progressStepText">初始化...</strong>
+                                </div>
+                                <div class="card-body p-2">
+                                    <div class="progress" style="height: 8px;">
+                                        <div id="progressBar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 0%"></div>
+                                    </div>
+                                    <small id="progressMsg" class="text-muted d-block mt-1">准备中...</small>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div id="fetchResult" class="d-none"></div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" id="cancelBtn">取消</button>
+                        <button type="submit" class="btn btn-primary" id="fetchBtn">
+                            <i class="bi bi-arrow-clockwise"></i> 开始拉取
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         function changePerPage(val) {
             window.location = '/?page=1&per_page=' + val;
         }
+
+        // Fetch modal form handling - uses async API with progress polling
+        document.getElementById('fetchForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const form = e.target;
+            const btn = document.getElementById('fetchBtn');
+            const cancelBtn = document.getElementById('cancelBtn');
+            const resultDiv = document.getElementById('fetchResult');
+            const progressDiv = document.getElementById('fetchProgress');
+            const progressBar = document.getElementById('progressBar');
+            const progressStepText = document.getElementById('progressStepText');
+            const progressMsg = document.getElementById('progressMsg');
+            
+            // Disable button and show loading
+            btn.disabled = true;
+            cancelBtn.disabled = true;
+            btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span> 启动中...';
+            resultDiv.className = 'd-none';
+            progressDiv.classList.remove('d-none');
+            
+            const formData = new FormData(form);
+            
+            try {
+                // Start async fetch
+                const startResponse = await fetch('/fetch/start', {
+                    method: 'POST',
+                    body: formData,
+                });
+                
+                const startData = await startResponse.json();
+                
+                if (!startData.task_id) {
+                    throw new Error('启动失败: ' + (startData.error || '未知错误'));
+                }
+                
+                const taskId = startData.task_id;
+                btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span> 抓取中...';
+                
+                // Poll for progress
+                let pollCount = 0;
+                const pollInterval = setInterval(async () => {
+                    pollCount++;
+                    try {
+                        const progResponse = await fetch(`/fetch/progress/${taskId}`);
+                        const progData = await progResponse.json();
+                        
+                        if (progData.status === 'running') {
+                            const step = progData.step || 0;
+                            const pct = Math.min(20 * step, 90);
+                            progressBar.style.width = pct + '%';
+                            progressStepText.textContent = `步骤 ${step}/5`;
+                            progressMsg.textContent = progData.message || '处理中...';
+                        } else if (progData.status === 'done') {
+                            clearInterval(pollInterval);
+                            progressBar.style.width = '100%';
+                            progressBar.classList.remove('progress-bar-animated');
+                            progressStepText.textContent = '完成';
+                            progressMsg.textContent = progData.message || '完成';
+                            
+                            // Show result
+                            const result = progData.result || {};
+                            resultDiv.className = 'alert alert-success';
+                            resultDiv.innerHTML = `<i class="bi bi-check-circle"></i> ${result.message || '完成'} <button type="button" class="btn btn-sm btn-outline-success ms-2" onclick="window.location.reload()">刷新列表查看</button>`;
+                            
+                            // Close modal after delay
+                            setTimeout(() => {
+                                const modal = bootstrap.Modal.getInstance(document.getElementById('fetchModal'));
+                                if (modal) modal.hide();
+                            }, 2000);
+                            
+                        } else if (progData.status === 'error') {
+                            clearInterval(pollInterval);
+                            progressDiv.classList.add('d-none');
+                            resultDiv.className = 'alert alert-danger';
+                            resultDiv.innerHTML = `<i class="bi bi-x-circle"></i> 拉取失败: ${progData.message || '未知错误'}`;
+                        } else if (progData.status === 'not_found') {
+                            clearInterval(pollInterval);
+                            // Task expired, try direct fetch as fallback
+                            throw new Error('任务已过期，请重试');
+                        }
+                    } catch (err) {
+                        clearInterval(pollInterval);
+                        progressDiv.classList.add('d-none');
+                        resultDiv.className = 'alert alert-danger';
+                        resultDiv.innerHTML = `<i class="bi bi-x-circle"></i> 轮询异常: ${err.message}`;
+                    }
+                }, 2000); // Poll every 2 seconds
+                
+                // Timeout safety: max 180 seconds
+                setTimeout(() => {
+                    clearInterval(pollInterval);
+                    if (btn.disabled) {
+                        progressDiv.classList.add('d-none');
+                        resultDiv.className = 'alert alert-warning';
+                        resultDiv.innerHTML = `<i class="bi bi-exclamation-triangle"></i> 超时（>3分钟），任务可能仍在后台运行。请稍后刷新列表查看结果。`;
+                    }
+                }, 180000);
+                
+            } catch (err) {
+                progressDiv.classList.add('d-none');
+                resultDiv.className = 'alert alert-danger';
+                resultDiv.innerHTML = `<i class="bi bi-x-circle"></i> 请求异常: ${err.message}`;
+            } finally {
+                btn.disabled = false;
+                cancelBtn.disabled = false;
+                btn.innerHTML = '<i class="bi bi-arrow-clockwise"></i> 开始拉取';
+                resultDiv.classList.remove('d-none');
+            }
+        });
     </script>
 </body>
 </html>

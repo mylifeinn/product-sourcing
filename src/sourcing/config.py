@@ -121,6 +121,8 @@ class PipelineConfig(BaseModel):
     keepa: KeepaConfig = Field(default_factory=KeepaConfig)
     wholesale: WholesaleConfig = Field(default_factory=WholesaleConfig)
     seed_niches: list[str] = Field(default_factory=list)
+    # Data sources configuration
+    data_sources: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class Settings(BaseSettings):
@@ -157,6 +159,9 @@ def load_config() -> tuple[PipelineConfig, Settings]:
     # seed_niches 在 YAML 顶层(不在 pipeline 下), 单独合并
     if raw.get("seed_niches"):
         pipeline.seed_niches = list(raw["seed_niches"])
+    # data_sources 也在 YAML 顶层，单独合并
+    if raw.get("data_sources"):
+        pipeline.data_sources = list(raw["data_sources"])
     settings = Settings()
     
     return pipeline, settings

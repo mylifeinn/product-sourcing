@@ -29,6 +29,8 @@ pipeline:
       # (BSR 越小越靠前) 视为单品在上升。
       bsr_improvement_pct: 30
       bsr_min_span_days: 14
+      # Reddit 趋势通道: 痛点贴+推荐贴总数 ≥ 此值视为趋势上升信号
+      reddit_trend_min_posts: 3
     
     gate_3_margin:
       min_gross_margin_pct: 45  # (retail - wholesale - shipping - fees) / retail
@@ -149,68 +151,147 @@ wholesale:
 # 跑 fetch-all 会遍历这里, 每个方向出一批候选 → 审核板里自然多样。
 # 想加/删方向直接改这个列表。
 seed_niches:
-  # --- 健康/康复 ---
+  # --- 健康/康复 (高客单价, 复购潜力) ---
   - "portable neck massager"
   - "posture corrector for back pain"
   - "heated shoulder massager"
   - "cervical pillow for neck pain"
   - "acupressure mat for back pain"
-  # --- 睡眠 ---
+  - "red light therapy device portable"          # 高 AOV $80-150, 痛点明确
+  - "tens unit muscle stimulator"                # 高 AOV $50-120, 医疗级痛点
+  - "percussion massage gun mini"                # 高 AOV $80-200, 健身恢复刚需
+  - "compression boots recovery"                 # 高 AOV $200-500, 专业级恢复
+  - "infrared heating pad back pain"             # 高 AOV $60-120, 慢性痛点
+  # --- 睡眠 (高 AOV, 长青) ---
   - "sleep mask with bluetooth headphones"
   - "white noise machine portable"
-  # --- 办公/数码配件 ---
+  - "weighted blanket cooling"                   # 高 AOV $80-150, 焦虑/失眠痛点
+  - "silk pillowcase anti aging"                 # 高 AOV $40-80, 美容+睡眠双痛点
+  - "mouth tape for sleep"                       # 高 AOV $20-40, 呼吸/打鼾痛点, 复购强
+  - "nasal strips breathing"                     # 高 AOV $15-30, 打鼾/呼吸痛点, 高复购
+  # --- 办公/数码配件 (轻便, 高频) ---
   - "magnetic cable organizer desktop"
   - "phone stand for desk adjustable"
   - "laptop stand for desk aluminum"
   - "usb c hub for macbook"
   - "tablet holder for bed adjustable"
-  # --- 宠物 ---
+  - "vertical mouse ergonomic"                   # 高 AOV $40-100, RSI/腕痛痛点
+  - "mechanical keyboard low profile"            # 高 AOV $80-200, 打字手感+腕健康
+  - "monitor arm desk mount"                     # 高 AOV $60-150, 颈椎/姿势痛点
+  - "blue light blocking glasses"                # 高 AOV $30-80, 眼疲劳痛点, 复购
+  - "desk cycle under desk"                      # 高 AOV $150-300, 久坐健康痛点
+  # --- 宠物 (高复购, 情感消费) ---
   - "dog nail grinder quiet"
   - "pet hair remover glove"
   - "cat water fountain filter"
-  # --- 厨房 ---
+  - "automatic pet feeder wifi"                  # 高 AOV $80-200, 分离焦虑/喂食痛点
+  - "pet camera treat dispenser"                 # 高 AOV $60-150, 看护/互动痛点
+  - "dog anxiety vest"                           # 高 AOV $30-60, 雷暴/分离焦虑痛点
+  - "cat litter box self cleaning"               # 高 AOV $200-500, 清理痛点, 高溢价
+  # --- 厨房 (高频, 刚需) ---
   - "milk frother handheld rechargeable"
   - "silicone food storage bags reusable"
-  # --- 美容/个人护理 ---
+  - "vacuum sealer food storage"                 # 高 AOV $80-200, 保鲜/省钱痛点
+  - "immersion blender handheld"                 # 高 AOV $50-120, 烹饪效率痛点
+  - "digital meat thermometer wireless"          # 高 AOV $40-100, 烹饪精准度痛点
+  - "air fryer accessories silicone"             # 高 AOV $20-50, 配套消耗品, 高复购
+  # --- 美容/个人护理 (高复购, 高溢价) ---
   - "facial ice roller for puffiness"
   - "scalp massager shampoo brush"
-  # --- 出行 ---
+  - "led face mask therapy"                      # 高 AOV $80-300, 抗衰老/痘印痛点
+  - "microcurrent facial device"                 # 高 AOV $100-300, 紧致/抗衰痛点
+  - "dermaplaning tool facial"                   # 高 AOV $20-50, 去角质/妆前痛点
+  - "laser hair removal ipl home"                # 高 AOV $200-500, 脱毛痛点, 极高溢价
+  - "teeth whitening kit led"                    # 高 AOV $50-150, 审美痛点, 复购
+  # --- 出行 (轻便, 高频) ---
   - "bike phone mount waterproof"
   - "book stand for reading hands free"
+  - "travel pillow memory foam"                  # 高 AOV $30-80, 颈痛/睡眠痛点
+  - "luggage tracker airtag"                     # 高 AOV $30-60, 丢失焦虑痛点
+  - "packing cubes compression"                  # 高 AOV $25-50, 收纳/整理痛点
+  - "portable espresso maker"                    # 高 AOV $80-200, 咖啡刚需+出行痛点
   # --- 家居/收纳 (扩容) ---
   - "under desk cable management tray"
   - "command hooks heavy duty"
   - "vacuum storage bags space saver"
   - "laundry hamper collapsible"
   - "shoe rack stackable"
+  - "drawer organizers adjustable"               # 高 AOV $20-50, 整理痛点
+  - "over door storage rack"                     # 高 AOV $30-80, 空间利用痛点
   # --- 厨房/餐饮 (扩容) ---
   - "electric spice grinder small"
   - "garlic press stainless steel"
   - "salad chopper bowl"
   - "collapsible dish rack"
   - "kitchen scale digital small"
+  - "mandoline slicer adjustable"                # 高 AOV $30-80, 切菜效率/安全痛点
+  - "herb keeper fridge"                         # 高 AOV $20-40, 保鲜/浪费痛点
   # --- 办公/健康 (扩容) ---
   - "wrist rest mouse pad gel"
   - "foot rest under desk"
   - "lumbar support pillow for office chair"
   - "carpal tunnel wrist brace"
+  - "standing desk converter"                    # 高 AOV $150-400, 久坐/姿势痛点
+  - "monitor light bar screen"                   # 高 AOV $50-120, 眼疲劳/氛围痛点
   # --- 宠物 (扩容) ---
   - "dog poop bag dispenser"
   - "cat scratching pad corrugated"
   - "pet grooming brush self cleaning"
+  - "dog cooling mat summer"                     # 高 AOV $30-80, 中暑/舒适痛点
+  - "pet nail clippers led"                      # 高 AOV $20-40, 剪指甲恐惧/安全痛点
   # --- 个人护理 (扩容) ---
   - "electric callus remover"
   - "nose hair trimmer rechargeable"
   - "insect bite healer device"
   - "hair removal tool facial"
+  - "water flosser cordless"                     # 高 AOV $50-120, 牙缝/牙龈痛点, 牙医推荐
+  - "tongue scraper copper"                      # 高 AOV $10-20, 口腔/口气痛点, 低价高复购
   # --- 户外/运动 (扩容) ---
   - "resistance bands set with handles"
   - "foam roller for back pain"
   - "massage gun mini"
   - "hiking water bottle clip"
+  - "yoga mat travel foldable"                   # 高 AOV $40-100, 便携/卫生痛点
+  - "knee brace compression"                     # 高 AOV $25-60, 膝痛/运动保护痛点
+  - "ankle support brace"                        # 高 AOV $20-50, 扭伤/预防痛点
+  # --- 新增: 高 AOV 细分赛道 ---
+  - "smart garden indoor hydroponic"             # 高 AOV $100-300, 种菜/食材新鲜痛点
+  - "posture reminder wearable"                  # 高 AOV $80-150, 姿势矫正痛点
+  - "sleep tracker ring"                         # 高 AOV $200-400, 睡眠数据量化痛点
+  - "hand grip strengthener adjustable"          # 高 AOV $20-50, 握力/康复痛点
+  - "foot massager shiatsu"                      # 高 AOV $80-200, 足底筋膜炎/疲劳痛点
+  - "neck stretcher cervical traction"           # 高 AOV $30-80, 颈椎/神经痛痛点
+  - "blue light therapy lamp"                    # 高 AOV $50-150, 情绪/睡眠节律痛点
+  - "posture corrector smart vibration"          # 高 AOV $60-120, 智能提醒+矫正
+  - "massage chair pad shiatsu"                  # 高 AOV $100-300, 全身按摩痛点
+  - "leg compression massager"                   # 高 AOV $80-200, 水肿/静脉曲张痛点
 
 # Brand config for SEO template (from Q22)
 brand:
   voice: ""
   usp_framework: ""
   trust_anchors: ""
+
+# Data Sources Configuration
+# Each source can be enabled/disabled and configured
+# name: internal identifier (used in API source param)
+# label: display name in UI
+# description: tooltip/help text
+# enabled: whether available in dropdown
+# priority: sort order in dropdown (lower = higher priority)
+data_sources:
+  - name: "public"
+    label: "Public (纯公开真实数据 - 默认推荐)"
+    description: "零登录、零 Cookie、只爬公开前台页面 (Amazon搜索/详情页 + Google Suggest/Trends + Reddit), 真实可信"
+    enabled: true
+    priority: 10
+  - name: "real"
+    label: "Real (聚合真实数据源: Amazon+Google+批发)"
+    description: "在 Public 基础上增加批发报价聚合 (AliExpress/Alibaba/Keepa 等，需住宅代理)"
+    enabled: true
+    priority: 20
+  - name: "mock"
+    label: "Mock (仅测试用假数据)"
+    description: "仅用于管线验证，绝不用于真实选品"
+    enabled: true
+    priority: 99

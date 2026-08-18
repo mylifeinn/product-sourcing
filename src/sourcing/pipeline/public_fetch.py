@@ -49,22 +49,53 @@ class PublicFetcher:
     # ------------------------------------------------------------------
     # 主入口
     # ------------------------------------------------------------------
-    async def fetch(self, niche: str, limit: int = 20) -> List[RawProductData]:
-        """并行爬取: Amazon(搜索页 + 详情页) + Google Suggest + Google Trends"""
+    async def fetch(self, niche: str, limit: int = 20, progress_callback=None) -> List[RawProductData]:
+        """并行爬取: Amazon(搜索页 + 详情页) + Google Suggest + Google Trends + Reddit
+        
+        Args:
+            niche: 搜索关键词
+            limit: 最大返回数量
+            progress_callback: 可选的进度回调函数 (step, message) -> None
+        """
         results = []
 
         # 1. Amazon 搜索页(真实)
-        amazon_products = await self._fetch_amazon(niche, limit)
+        amazon_products = await self._fetch_amazon(niche, limit, progress_callback)
 
         # 2. Amazon 详情页增强: BSR / Item Weight / Product Dimensions(真实,限速)
         if amazon_products:
             amazon_products = await self._enrich_amazon_details(amazon_products, max_details=min(6, limit))
 
-        # 3. 关键词: Google Suggest(REAL 关键词) + Trends rising(REAL)
-        suggest_kws = await self._fetch_google_suggest(niche)
-        trends_data = await self._fetch_google_trends(niche)
+        # 3. 关键词: Google Suggest(REAL 关键词) + Trends rising(REAL) + Reddit 痛点/推荐
+        suggest_kws, trends_data, reddit_data = await asyncio.gather(
+            self._fetch_google_suggest(niche),
+            self._fetch_google_trends(niche),
+            self._fetch_reddit(niche, limit=20),
+            return_exceptions=True
+        )
+        # 异常处理
+        if isinstance(suggest_kws, Exception):
+            print(f"[fetch] Google Suggest failed: {suggest_kws}")
+            suggest_kws = []
+        if isinstance(trends_data, Exception):
+            print(f"[fetch] Google Trends failed: {trends_data}")
+            trends_data = {"yoy_pct": 0, "rising_kws": []}
+        if isinstance(reddit_data, Exception):
+            print(f"[fetch] Reddit failed: {reddit_data}")
+            reddit_data = []
 
-        # 4. 组装 RawProductData
+        # 4. 从 Reddit 提取额外长尾关键词
+        reddit_kws = await self._fetch_reddit_keywords(niche)
+        
+        # 合并所有关键词
+        all_kws = suggest_kws + trends_data.get("rising_kws", []) + reddit_kws
+
+        # 5. Reddit 痛点/推荐信号汇总 (用于后续评分参考)
+        reddit_pain_points = [p for p in reddit_data if p["type"] == "pain_point"]
+        reddit_recommendations = [p for p in reddit_data if p["type"] == "recommendation"]
+        reddit_complaints = [p for p in reddit_data if p["type"] == "complaint"]
+
+        # 6. 组装 RawProductData
         for comp in amazon_products[:limit]:
             results.append(RawProductData(
                 title=comp["title"],
@@ -81,10 +112,14 @@ class PublicFetcher:
                 competitor_reviews=comp.get("reviews", 0),
                 competitor_urls=[comp["url"]],
                 amazon_rating=comp.get("rating", 0.0),
-                longtail_keywords=suggest_kws + trends_data.get("rising_kws", []),
+                longtail_keywords=all_kws,
                 google_trends_yoy_pct=trends_data.get("yoy_pct", 0),
                 tiktok_hashtag_growth_pct=0.0,  # TikTok 无免费公开数据 → MISSING,不造假
                 estimated_aov_usd=comp.get("price_usd", 0.0),  # 真实竞品价格
+                # Reddit 信号存入 raw_data 供评分层使用
+                reddit_pain_points=reddit_pain_points[:5],
+                reddit_recommendations=reddit_recommendations[:5],
+                reddit_complaints=reddit_complaints[:5],
             ))
 
         return results
@@ -128,145 +163,187 @@ class PublicFetcher:
             "--disable-dev-shm-usage",
         ]
 
-    async def _fetch_amazon(self, niche: str, limit: int) -> List[dict]:
-        """爬 Amazon 搜索前 1 页: 标题/价格/评分/评论数/bought in past month/ASIN"""
+    async def _fetch_amazon(self, niche: str, limit: int, progress_callback=None) -> List[dict]:
+        """爬 Amazon 搜索前 1 页: 标题/价格/评分/评论数/bought in past month/ASIN
+        
+        Args:
+            niche: 搜索关键词
+            limit: 最大返回数量
+            progress_callback: 可选的进度回调函数 (step, message) -> None
+        """
         products = []
         url = f"https://www.amazon.com/s?k={quote_plus(niche)}&page=1"
-
-        try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True, args=self._browser_launch_args())
-                context, page = await self._new_amazon_context(browser)
-
-                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-
-                # 等待搜索结果容器
-                try:
-                    await page.wait_for_selector(
-                        '[data-component-type="s-search-result"], .s-result-item', timeout=15000
-                    )
-                except Exception:
-                    pass
-
-                # 搜索结果总数(REAL, Gate1 volume 代理): "over 2,000 results" / "300 results"
-                result_count = 0
-                try:
-                    rc_el = await page.query_selector('span.a-color-state.a-text-bold')
-                    if rc_el:
-                        rc_text = (await rc_el.inner_text()).strip()
-                        m = re.search(r'([\d,]+(?:\.\d+)?[KMB]?)\s*results?', rc_text, re.I)
-                        if m:
-                            result_count = self._parse_compact_number(m.group(1))
-                except Exception:
-                    pass
-                if not result_count:
+        max_retries = 3
+        base_delay = 2  # seconds
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                if progress_callback:
+                    progress_callback(1, f"尝试连接 Amazon (第 {attempt}/{max_retries} 次)...")
+                
+                async with async_playwright() as p:
+                    browser = await p.chromium.launch(headless=True, args=self._browser_launch_args())
                     try:
-                        body_text = await page.inner_text('body')
-                        m = re.search(r'of\s+(?:over\s+)?([\d,]+(?:\.\d+)?[KMB]?)\s*results?', body_text, re.I)
-                        if m:
-                            result_count = self._parse_compact_number(m.group(1))
-                    except Exception:
-                        pass
+                        context, page = await self._new_amazon_context(browser)
+                        
+                        if progress_callback:
+                            progress_callback(1, f"加载搜索页面 (尝试 {attempt}/{max_retries})...")
+                        
+                        await page.goto(url, wait_until="domcontentloaded", timeout=45000)
 
-                items = await page.query_selector_all('[data-component-type="s-search-result"]')
-                if not items:
-                    items = await page.query_selector_all('.s-result-item[data-asin]')
+                        # 等待搜索结果容器
+                        try:
+                            await page.wait_for_selector(
+                                '[data-component-type="s-search-result"], .s-result-item', timeout=20000
+                            )
+                        except Exception as e:
+                            print(f"[Amazon] 等待结果容器超时: {e}")
+                            # 继续尝试解析
 
-                for item in items[:limit]:
-                    try:
-                        # 标题
-                        title = ""
-                        for sel in ['h2 a span', 'h2 .a-text-normal', '.a-size-base-plus', '.a-text-normal']:
-                            title_el = await item.query_selector(sel)
-                            if title_el:
-                                title = (await title_el.inner_text()).strip()
-                                if title:
-                                    break
-                        # 过滤徽章/广告文本(Amazon's Choice / Overall Pick / Sponsored 等)
-                        if any(bad in title for bad in ("Amazon's Choice", "Overall Pick", "Sponsored", "Best Seller")):
-                            title = ""
-                            # 广告卡片标题在 h2 的直接 span 里
-                            h2_el = await item.query_selector("h2")
-                            if h2_el:
-                                t2 = (await h2_el.inner_text()).strip()
-                                if t2 and not any(bad in t2 for bad in ("Amazon's Choice", "Overall Pick", "Sponsored", "Best Seller")):
-                                    title = t2
-                        if not title:
+                        # 搜索结果总数(REAL, Gate1 volume 代理)
+                        result_count = 0
+                        try:
+                            rc_el = await page.query_selector('span.a-color-state.a-text-bold')
+                            if rc_el:
+                                rc_text = (await rc_el.inner_text()).strip()
+                                m = re.search(r'([\d,]+(?:\.\d+)?[KMB]?)\s*results?', rc_text, re.I)
+                                if m:
+                                    result_count = self._parse_compact_number(m.group(1))
+                        except Exception:
+                            pass
+                        if not result_count:
+                            try:
+                                body_text = await page.inner_text('body')
+                                m = re.search(r'of\s+(?:over\s+)?([\d,]+(?:\.\d+)?[KMB]?)\s*results?', body_text, re.I)
+                                if m:
+                                    result_count = self._parse_compact_number(m.group(1))
+                            except Exception:
+                                pass
+
+                        items = await page.query_selector_all('[data-component-type="s-search-result"]')
+                        if not items:
+                            items = await page.query_selector_all('.s-result-item[data-asin]')
+
+                        if not items:
+                            print(f"[Amazon] 未找到商品项 (尝试 {attempt}/{max_retries})")
+                            if attempt < max_retries:
+                                await asyncio.sleep(2 ** attempt)  # exponential backoff
+                                continue
+                            break
+
+                        for item in items[:limit]:
+                            try:
+                                # 标题
+                                title = ""
+                                for sel in ['h2 a span', 'h2 .a-text-normal', '.a-size-base-plus', '.a-text-normal']:
+                                    title_el = await item.query_selector(sel)
+                                    if title_el:
+                                        title = (await title_el.inner_text()).strip()
+                                        if title:
+                                            break
+                                # 过滤徽章/广告文本
+                                if any(bad in title for bad in ("Amazon's Choice", "Overall Pick", "Sponsored", "Best Seller")):
+                                    title = ""
+                                    h2_el = await item.query_selector("h2")
+                                    if h2_el:
+                                        t2 = (await h2_el.inner_text()).strip()
+                                        if t2 and not any(bad in t2 for bad in ("Amazon's Choice", "Overall Pick", "Sponsored", "Best Seller")):
+                                            title = t2
+                                if not title:
+                                    continue
+
+                                # 价格
+                                price_usd = 0.0
+                                for sel in ['.a-price-whole', '.a-offscreen', '[data-a-color="price"] .a-offscreen']:
+                                    price_el = await item.query_selector(sel)
+                                    if price_el:
+                                        price_text = await price_el.inner_text()
+                                        price_usd = float(re.sub(r'[^\d.]', '', price_text)) if price_text else 0
+                                        if price_usd > 0:
+                                            break
+
+                                # 评分
+                                rating = 0.0
+                                rating_el = await item.query_selector('[aria-label*="stars"], [aria-label*="out of 5"]')
+                                if rating_el:
+                                    aria = await rating_el.get_attribute('aria-label') or ""
+                                    m = re.search(r'(\d+\.?\d*)', aria)
+                                    rating = float(m.group(1)) if m else 0
+
+                                # 评论数(REAL)
+                                reviews = 0
+                                for sel in ['span.s-underline-text', 'a[aria-label*="reviews"] span', '.a-size-base.s-underline-text']:
+                                    reviews_el = await item.query_selector(sel)
+                                    if reviews_el:
+                                        reviews_text = (await reviews_el.inner_text()).strip()
+                                        digits = re.sub(r'[^\d]', '', reviews_text)
+                                        reviews = int(digits) if digits else 0
+                                        if reviews > 0:
+                                            break
+
+                                # bought in past month 徽章(REAL 销售信号)
+                                bought_past_month = 0
+                                for sel in ['.a-size-base.a-color-secondary', '.a-row.a-size-base.a-color-secondary']:
+                                    badge_els = await item.query_selector_all(sel)
+                                    for b_el in badge_els:
+                                        text = (await b_el.inner_text()).strip()
+                                        m = re.search(r'([\d.,]+[KMB]?)\+?\s*bought in past month', text, re.I)
+                                        if m:
+                                            bought_past_month = self._parse_compact_number(m.group(1))
+                                            break
+                                    if bought_past_month:
+                                        break
+
+                                # 链接和 ASIN
+                                asin = ""
+                                link_el = await item.query_selector('h2 a, .a-link-normal[href*="/dp/"]')
+                                href = await link_el.get_attribute('href') if link_el else ""
+                                if href:
+                                    m = re.search(r'/dp/([A-Z0-9]{10})', href)
+                                    asin = m.group(1) if m else ""
+
+                                # 90 天销量
+                                est_sales_90d = bought_past_month * 3
+                                sales_method = "bought_in_past_month_x3" if bought_past_month else ""
+
+                                products.append({
+                                    "title": title,
+                                    "price_usd": price_usd,
+                                    "rating": rating,
+                                    "reviews": reviews,
+                                    "bought_in_past_month": bought_past_month,
+                                    "url": f"https://www.amazon.com/dp/{asin}" if asin else urljoin("https://www.amazon.com", href),
+                                    "asin": asin,
+                                    "source": "amazon",
+                                    "est_sales_90d": est_sales_90d,
+                                    "sales_method": sales_method,
+                                    "result_count": result_count,
+                                })
+                            except Exception as e:
+                                print(f"[Amazon] 解析单品失败: {e}")
+                                continue
+
+                        # 成功获取到产品，跳出重试循环
+                        if products:
+                            break
+                        elif attempt < max_retries:
+                            print(f"[Amazon] 未解析到有效产品，重试 ({attempt}/{max_retries})...")
+                            await asyncio.sleep(2 ** attempt)
                             continue
 
-                        # 价格
-                        price_usd = 0.0
-                        for sel in ['.a-price-whole', '.a-offscreen', '[data-a-color="price"] .a-offscreen']:
-                            price_el = await item.query_selector(sel)
-                            if price_el:
-                                price_text = await price_el.inner_text()
-                                price_usd = float(re.sub(r'[^\d.]', '', price_text)) if price_text else 0
-                                if price_usd > 0:
-                                    break
+                    finally:
+                        await browser.close()
 
-                        # 评分
-                        rating = 0.0
-                        rating_el = await item.query_selector('[aria-label*="stars"], [aria-label*="out of 5"]')
-                        if rating_el:
-                            aria = await rating_el.get_attribute('aria-label') or ""
-                            m = re.search(r'(\d+\.?\d*)', aria)
-                            rating = float(m.group(1)) if m else 0
-
-                        # 评论数(REAL) — 新版 DOM: span.s-underline-text 文本如 "(34)"
-                        reviews = 0
-                        for sel in ['span.s-underline-text', 'a[aria-label*="reviews"] span', '.a-size-base.s-underline-text']:
-                            reviews_el = await item.query_selector(sel)
-                            if reviews_el:
-                                reviews_text = (await reviews_el.inner_text()).strip()
-                                digits = re.sub(r'[^\d]', '', reviews_text)
-                                reviews = int(digits) if digits else 0
-                                if reviews > 0:
-                                    break
-
-                        # bought in past month 徽章(REAL 销售信号)
-                        bought_past_month = 0
-                        for sel in ['.a-size-base.a-color-secondary', '.a-row.a-size-base.a-color-secondary']:
-                            badge_els = await item.query_selector_all(sel)
-                            for b_el in badge_els:
-                                text = (await b_el.inner_text()).strip()
-                                m = re.search(r'([\d.,]+[KMB]?)\+?\s*bought in past month', text, re.I)
-                                if m:
-                                    bought_past_month = self._parse_compact_number(m.group(1))
-                                    break
-                            if bought_past_month:
-                                break
-
-                        # 链接和 ASIN
-                        asin = ""
-                        link_el = await item.query_selector('h2 a, .a-link-normal[href*="/dp/"]')
-                        href = await link_el.get_attribute('href') if link_el else ""
-                        if href:
-                            m = re.search(r'/dp/([A-Z0-9]{10})', href)
-                            asin = m.group(1) if m else ""
-
-                        # 90 天销量: 优先真实徽章×3, 其次 BSR 估算(稍后详情页), 无则 0
-                        est_sales_90d = bought_past_month * 3
-                        sales_method = "bought_in_past_month_x3" if bought_past_month else ""
-
-                        products.append({
-                            "title": title,
-                            "price_usd": price_usd,
-                            "rating": rating,
-                            "reviews": reviews,
-                            "bought_in_past_month": bought_past_month,
-                            "url": f"https://www.amazon.com/dp/{asin}" if asin else urljoin("https://www.amazon.com", href),
-                            "asin": asin,
-                            "source": "amazon",
-                            "est_sales_90d": est_sales_90d,
-                            "sales_method": sales_method,
-                            "result_count": result_count,
-                        })
-                    except Exception:
-                        continue
-
-                await browser.close()
-        except Exception as e:
-            print(f"[Amazon] fetch failed: {e}")
+            except Exception as e:
+                print(f"[Amazon] 第 {attempt} 次尝试失败: {e}")
+                if attempt < max_retries:
+                    delay = base_delay * (2 ** (attempt - 1))
+                    print(f"[Amazon] {delay}s 后重试...")
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    print(f"[Amazon] 所有重试均失败: {e}")
+                    break
 
         return products
 
@@ -317,59 +394,133 @@ class PublicFetcher:
 
     @staticmethod
     async def _parse_detail_page(page) -> dict:
-        """解析详情页: BSR + Item Weight + Product Dimensions"""
+        """解析详情页: BSR + Item Weight + Product Dimensions
+
+        更健壮的解析: 尝试多种选择器, 检测验证码页面, 多模式正则匹配
+        """
         result = {"bsr": 0, "weight_g": 0.0, "dimensions_cm": (0.0, 0.0, 0.0)}
+        
+        # 先检测是否被拦截 (验证码/错误页面)
+        try:
+            body_text = await page.inner_text('body')
+            if any(kw in body_text for kw in [
+                "Click the button below to continue shopping",
+                "To discuss automated access to Amazon data",
+                "api-services-support@amazon.com",
+                "validateCaptcha",
+                "Enter the characters you see below",
+                "Sorry! Something went wrong",
+            ]):
+                print("[Amazon detail] Page blocked (CAPTCHA/error page)")
+                return result
+        except Exception:
+            pass
+        
         texts = []
 
-        # 两种布局都抓
-        for sel in [
+        # 尝试多种选择器 (新版 Amazon 页面结构变化频繁)
+        selectors = [
             "#productDetails_detailBullets_sections1",
-            "#detailBullets_feature_div",
+            "#detailBullets_feature_div", 
             "#prodDetails",
-        ]:
+            "#productDetails_techSpec_section_1",
+            "#productDetails_db_sections",
+            ".a-expander-content.a-expander-extend-content",
+            "#feature-bullets",
+            "table.a-keyvalue",
+            "#detailBullets_feature_div .a-list-item",
+            "[data-feature-name='detailBullets']",
+            ".prodDetSectionEntry",
+            "#productDetailsTable",
+        ]
+        
+        for sel in selectors:
             try:
                 el = await page.query_selector(sel)
                 if el:
-                    texts.append(await el.inner_text())
+                    text = await el.inner_text()
+                    if text and len(text.strip()) > 20:
+                        texts.append(text)
             except Exception:
                 continue
+        
+        # 如果上述都没抓到, 尝试抓取 body 中的关键区域
+        if not texts:
+            try:
+                full_page = await page.inner_text('body')
+                # 只保留可能包含规格的部分
+                for keyword in ["Product Details", "Technical Details", "Product Dimensions", "Item Weight", "Product Information"]:
+                    idx = full_page.find(keyword)
+                    if idx >= 0:
+                        texts.append(full_page[idx:idx+3000])
+                        break
+            except Exception:
+                pass
 
         # 去掉隐藏字符(RTL 标记等, Amazon 详情页常见)
         full = "\n".join(texts)
         full = re.sub(r'[\u200e\u200f\u200b\u2060\ufeff]', '', full)
+        
+        if not full.strip():
+            return result
 
-        # BSR: "Best Sellers Rank: #1,234 in Category" 或 "#56 in Subcategory"
-        m = re.search(r'Best Sellers Rank:?\s*#([\d,]+)', full)
-        if m:
-            result["bsr"] = int(m.group(1).replace(",", ""))
-        else:
-            # 新版页面格式: "#1,234 in Category (See Top 100...)"
-            m2 = re.search(r'#([\d,]+)\s+in\s+[A-Za-z]', full)
-            if m2:
-                result["bsr"] = int(m2.group(1).replace(",", ""))
+        # BSR: 多种格式
+        bsr_patterns = [
+            r'Best Sellers Rank:?\s*#([\d,]+)',
+            r'#([\d,]+)\s+in\s+[A-Za-z]',
+            r'Best Seller Rank\s*#([\d,]+)',
+            r'Rank\s*#([\d,]+)\s+in',
+        ]
+        for pat in bsr_patterns:
+            m = re.search(pat, full)
+            if m:
+                result["bsr"] = int(m.group(1).replace(",", ""))
+                break
 
-        # Product Dimensions: "3.7 x 1.9 x 4.3 inches" (冒号前后可能有隐藏字符)
-        m = re.search(r'Product Dimensions\s*:?\s*([\d.]+\s*x\s*[\d.]+\s*x\s*[\d.]+)\s*inches', full, re.I)
-        if m:
-            dims = [float(x) for x in re.split(r'\s*x\s*', m.group(1))]
-            if len(dims) == 3:
-                result["dimensions_cm"] = tuple(round(d * 2.54, 1) for d in dims)
+        # Product Dimensions: 多种格式
+        dim_patterns = [
+            r'Product Dimensions\s*:?\s*([\d.]+\s*x\s*[\d.]+\s*x\s*[\d.]+)\s*inches',
+            r'Product Dimensions\s*:?\s*([\d.]+\s*x\s*[\d.]+\s*x\s*[\d.]+)\s*(?:in|inches|")',
+            r'Dimensions\s*:?\s*([\d.]+\s*x\s*[\d.]+\s*x\s*[\d.]+)\s*inches',
+            r'(\d+\.?\d*)\s*x\s*(\d+\.?\d*)\s*x\s*(\d+\.?\d*)\s*(?:in|inches|")',
+        ]
+        for pat in dim_patterns:
+            m = re.search(pat, full, re.I)
+            if m:
+                if m.lastindex and m.lastindex >= 3:
+                    # 捕获组模式
+                    dims = [float(m.group(i)) for i in range(1, 4)]
+                else:
+                    # 单组模式, 手动分割
+                    dims_str = m.group(1) if m.lastindex >= 1 else m.group(0)
+                    dims = [float(x) for x in re.split(r'\s*x\s*', dims_str)]
+                if len(dims) == 3 and all(d > 0 for d in dims):
+                    result["dimensions_cm"] = tuple(round(d * 2.54, 1) for d in dims)
+                    break
 
-        # Item Weight: "Item Weight: 1.2 pounds" / "Item Weight: 500 g"
-        # 或嵌入 Dimensions 行: "3.7 x 1.9 x 4.3 inches; 6.17 ounces"
-        m = re.search(r'Item Weight:?\s*([\d.]+)\s*(pounds|ounces|g|kg|grams|kilograms)', full, re.I)
-        if not m:
-            m = re.search(r'inches\s*[;，]?\s*([\d.]+)\s*(pounds|ounces)', full, re.I)
-        if m:
-            val, unit = float(m.group(1)), m.group(2).lower()
-            if unit.startswith("pound"):
-                result["weight_g"] = round(val * 453.6, 1)
-            elif unit.startswith("ounce"):
-                result["weight_g"] = round(val * 28.35, 1)
-            elif unit.startswith("kg"):
-                result["weight_g"] = round(val * 1000, 1)
-            else:
-                result["weight_g"] = round(val, 1)
+        # Item Weight: 多种格式
+        weight_patterns = [
+            r'Item Weight\s*:?\s*([\d.]+)\s*(pounds?|ounces?|lbs?|oz|g|kg|grams?|kilograms?)',
+            r'Weight\s*:?\s*([\d.]+)\s*(pounds?|ounces?|lbs?|oz|g|kg|grams?|kilograms?)',
+            r'Item Weight\s*[:\-]\s*([\d.]+)\s*(pounds?|ounces?|lbs?|oz|g|kg|grams?|kilograms?)',
+            r'inches\s*[;，]?\s*([\d.]+)\s*(pounds?|ounces?|lbs?|oz)',
+            r'Shipping Weight\s*:?\s*([\d.]+)\s*(pounds?|ounces?|lbs?|oz|g|kg|grams?|kilograms?)',
+        ]
+        for pat in weight_patterns:
+            m = re.search(pat, full, re.I)
+            if m:
+                val, unit = float(m.group(1)), m.group(2).lower()
+                if unit.startswith("pound") or unit == "lbs":
+                    result["weight_g"] = round(val * 453.6, 1)
+                elif unit.startswith("ounce") or unit == "oz":
+                    result["weight_g"] = round(val * 28.35, 1)
+                elif unit.startswith("kg") or unit == "kilograms":
+                    result["weight_g"] = round(val * 1000, 1)
+                elif unit.startswith("g") and unit not in ("kg", "grams"):
+                    result["weight_g"] = round(val, 1)
+                elif unit == "grams":
+                    result["weight_g"] = round(val, 1)
+                break
 
         return result
 
@@ -421,6 +572,307 @@ class PublicFetcher:
         return unique[:20]
 
     # ------------------------------------------------------------------
+    # Reddit 痛点/推荐挖掘(REAL 用户讨论, 免费公开 JSON API)
+    # ------------------------------------------------------------------
+    # 相关子版块映射: niche → 可能的 subreddit
+    REDDIT_SUBREDDIT_MAP = {
+        # 健康/康复
+        "neck massager": ["chronicpain", "neckpain", "massage", "buyitforlife"],
+        "posture corrector": ["posture", "backpain", "ergonomics", "chronicpain"],
+        "shoulder massager": ["shoulderpain", "massage", "chronicpain"],
+        "cervical pillow": ["sleep", "neckpain", "buyitforlife"],
+        "acupressure mat": ["backpain", "chronicpain", "alternativehealth"],
+        "red light therapy": ["redlighttherapy", "biohackers", "skincareaddiction", "chronicpain"],
+        "tens unit": ["chronicpain", "physicaltherapy", "backpain", "sciatica"],
+        "massage gun": ["fitness", "recovery", "massage", "homegym"],
+        "compression boots": ["running", "triathlon", "recovery", "marathontraining"],
+        "infrared heating pad": ["chronicpain", "backpain", "fibromyalgia", "arthritis"],
+        # 睡眠
+        "sleep mask": ["sleep", "insomnia", "buyitforlife"],
+        "white noise": ["sleep", "whitenoise", "parenting"],
+        "weighted blanket": ["sleep", "anxiety", "autism", "buyitforlife"],
+        "silk pillowcase": ["skincareaddiction", "haircare", "beauty", "buyitforlife"],
+        "mouth tape": ["sleep", "snoring", "mouthbreathing", "biohackers"],
+        "nasal strips": ["snoring", "sleep", "allergies", "running"],
+        # 办公/数码
+        "cable organizer": ["cablemanagement", "homeoffice", "homelab"],
+        "phone stand": ["phoneaccessories", "android", "iphone"],
+        "laptop stand": ["laptops", "macbook", "homeoffice", "ergonomics"],
+        "usb hub": ["macbook", "usbcharging", "techsupport"],
+        "tablet holder": ["tablets", "ipad", "bedroom"],
+        "vertical mouse": ["ergonomics", "rsi", "mousereview", "trackballs"],
+        "mechanical keyboard": ["mechanicalkeyboards", "keyboards", "ergonomics"],
+        "monitor arm": ["monitors", "homeoffice", "battlestations", "ergonomics"],
+        "blue light glasses": ["gaming", "eyehealth", "biohackers", "glasses"],
+        "desk cycle": ["fitness", "homeoffice", "standingdesk", "ergonomics"],
+        # 宠物
+        "dog nail grinder": ["dogs", "dogtraining", "puppy101"],
+        "pet hair remover": ["pets", "cats", "dogs", "cleaning"],
+        "cat water fountain": ["cats", "catcare"],
+        "automatic pet feeder": ["pets", "cats", "dogs", "smartthings"],
+        "pet camera": ["pets", "homesecurity", "smartthings", "cats"],
+        "dog anxiety vest": ["dogs", "dogtraining", "reactivedogs", "anxiety"],
+        "cat litter box self cleaning": ["cats", "catcare", "smartthings"],
+        # 厨房
+        "milk frother": ["coffee", "espresso", "barista"],
+        "food storage bags": ["zerowaste", "mealprep", "kitchen"],
+        "vacuum sealer": ["foodsaver", "mealprep", "sousvide", "bulkfoods"],
+        "immersion blender": ["cooking", "kitchengadgets", "soup"],
+        "meat thermometer": ["cooking", "grilling", "bbq", "sousvide"],
+        "air fryer accessories": ["airfryer", "cooking", "mealprep"],
+        # 美容/个人护理
+        "ice roller": ["skincareaddiction", "beauty", "asianbeauty"],
+        "scalp massager": ["haircare", "scalphealth", "hairloss"],
+        "led face mask": ["skincareaddiction", "asianbeauty", "beauty", "antiaging"],
+        "microcurrent facial": ["skincareaddiction", "esthetics", "antiaging", "beauty"],
+        "dermaplaning": ["skincareaddiction", "beauty", "asianbeauty", "exfoliation"],
+        "laser hair removal": ["skincareaddiction", "laserhairremoval", "beauty"],
+        "teeth whitening": ["teethwhitening", "dental", "beauty", "smile"],
+        # 出行
+        "bike phone mount": ["bicycling", "bikecommuting", "cycling"],
+        "book stand": ["books", "reading", "ergonomics"],
+        "travel pillow": ["travel", "onebag", "frequenttravelers", "sleep"],
+        "luggage tracker": ["travel", "airtags", "luggage", "frequenttravelers"],
+        "packing cubes": ["onebag", "travel", "packing", "minimalism"],
+        "portable espresso": ["coffee", "camping", "travel", "espresso"],
+        # 家居/收纳
+        "cable management": ["cablemanagement", "homeoffice", "homelab"],
+        "command hooks": ["homeimprovement", "organization", "renting"],
+        "vacuum storage bags": ["organization", "storage", "moving"],
+        "laundry hamper": ["laundry", "organization", "apartmentliving"],
+        "shoe rack": ["organization", "entryway", "apartmentliving"],
+        "drawer organizers": ["organization", "declutter", "apartmentliving"],
+        "over door storage": ["organization", "apartmentliving", "smallspaces"],
+        # 厨房/餐饮
+        "spice grinder": ["cooking", "spices", "kitchengadgets"],
+        "garlic press": ["cooking", "kitchengadgets", "buyitforlife"],
+        "salad chopper": ["cooking", "mealprep", "kitchengadgets"],
+        "dish rack": ["kitchen", "organization", "apartmentliving"],
+        "kitchen scale": ["cooking", "baking", "mealprep"],
+        "mandoline slicer": ["cooking", "kitchengadgets", "mealprep", "safety"],
+        "herb keeper": ["cooking", "gardening", "zerowaste", "mealprep"],
+        # 办公/健康
+        "wrist rest": ["mechanicalkeyboards", "ergonomics", "rsi"],
+        "foot rest": ["ergonomics", "homeoffice", "standingdesk"],
+        "lumbar support": ["backpain", "ergonomics", "officechair"],
+        "carpal tunnel": ["rsi", "carpaltunnel", "wristpain"],
+        "standing desk converter": ["standingdesk", "homeoffice", "ergonomics", "backpain"],
+        "monitor light bar": ["monitors", "homeoffice", "battlestations", "lighting"],
+        # 宠物
+        "dog poop bag": ["dogs", "dogwalking"],
+        "cat scratching pad": ["cats", "catcare"],
+        "pet grooming brush": ["dogs", "cats", "petgrooming"],
+        "dog cooling mat": ["dogs", "pets", "hotweather"],
+        "pet nail clippers": ["dogs", "cats", "petgrooming", "dogtraining"],
+        # 个人护理
+        "callus remover": ["footcare", "skincareaddiction"],
+        "nose hair trimmer": ["malegrooming", "grooming"],
+        "insect bite healer": ["camping", "hiking", "firstaid"],
+        "facial hair removal": ["skincareaddiction", "beauty", "asianbeauty"],
+        "water flosser": ["dental", "oralhealth", "flossing", "waterpik"],
+        "tongue scraper": ["oralhealth", "ayurveda", "zerowaste", "biohackers"],
+        # 户外/运动
+        "resistance bands": ["homegym", "fitness", "bodyweightfitness"],
+        "foam roller": ["fitness", "mobility", "running"],
+        "massage gun mini": ["fitness", "recovery", "massage"],
+        "water bottle clip": ["hiking", "camping", "ultralight"],
+        "yoga mat travel": ["yoga", "travel", "fitness", "onebag"],
+        "knee brace": ["kneepain", "running", "weightlifting", "physicaltherapy"],
+        "ankle support": ["anklepain", "running", "basketball", "physicaltherapy"],
+        # 新增: 高 AOV 细分赛道
+        "smart garden": ["indoorgarden", "hydroponics", "gardening", "smartgarden"],
+        "posture reminder": ["posture", "backpain", "ergonomics", "wearables"],
+        "sleep tracker ring": ["sleep", "wearables", "biohackers", "ouraring"],
+        "hand grip strengthener": ["griptraining", "climbing", "fitness", "handtherapy"],
+        "foot massager": ["footpain", "plantarfasciitis", "massage", "reflexology"],
+        "neck stretcher": ["neckpain", "chronicpain", "cervical", "physicaltherapy"],
+        "blue light therapy": ["sleep", "seasonalaffectivedisorder", "biohackers", "lighttherapy"],
+        "posture corrector smart": ["posture", "wearables", "backpain", "ergonomics"],
+        "massage chair pad": ["massage", "chronicpain", "backpain", "relaxation"],
+        "leg compression massager": ["lymphedema", "varicoseveins", "recovery", "circulation"],
+    }
+
+    @staticmethod
+    def _match_subreddits(niche: str) -> List[str]:
+        """根据 niche 匹配相关 subreddit"""
+        niche_lower = niche.lower()
+        matched = set()
+        for key, subs in PublicFetcher.REDDIT_SUBREDDIT_MAP.items():
+            if key in niche_lower or any(kw in niche_lower for kw in key.split()):
+                matched.update(subs)
+        # 兜底通用版块
+        if not matched:
+            matched.update(["buyitforlife", "productreviews", "shutupandtakemymoney"])
+        return list(matched)[:5]  # 限制最多 5 个
+
+    async def _fetch_reddit(self, niche: str, limit: int = 15) -> List[dict]:
+        """从 Reddit 抓取痛点讨论、产品推荐、吐槽帖 (免费公开 RSS, 无需登录)
+
+        返回结构:
+        [
+            {"type": "pain_point", "text": "...", "subreddit": "...", "score": 100, "url": "..."},
+            {"type": "recommendation", "text": "...", "product_mentioned": "...", "subreddit": "...", "score": 50, "url": "..."},
+            {"type": "complaint", "text": "...", "subreddit": "...", "score": 80, "url": "..."},
+        ]
+        """
+        results = []
+        subreddits = self._match_subreddits(niche)
+        niche_words = set(niche.lower().split())
+        
+        # 关键词用于分类帖子类型
+        pain_keywords = {"pain", "hurt", "ache", "problem", "issue", "struggle", "annoying", "frustrating", "terrible", "awful", "worst", "broken", "failed", "disappointed", "regret", "waste", "useless", "doesn't work", "not working", "stopped working", "cheap", "flimsy"}
+        rec_keywords = {"recommend", "suggest", "best", "favorite", "love", "great", "amazing", "perfect", "works", "works well", "highly recommend", "worth it", "game changer", "life changing", "buy", "bought", "purchased"}
+        complaint_keywords = {"avoid", "don't buy", "waste of money", "returned", "refund", "broken", "defective", "poor quality", "cheaply made", "fell apart", "stopped working", "customer service", "warranty"}
+
+        async with httpx.AsyncClient(
+            timeout=15,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; ProductSourcingBot/1.0)"}
+        ) as client:
+            for sub in subreddits:
+                try:
+                    # 使用 RSS 源 (更稳定, 不易被封) - 只尝试基础 URL, 不加参数避免 429
+                    rss_url = f"https://www.reddit.com/r/{sub}/.rss"
+                    resp = await client.get(rss_url)
+                    if resp.status_code != 200:
+                        if resp.status_code == 429:
+                            print(f"[Reddit RSS] r/{sub} rate limited (429), skipping")
+                        else:
+                            print(f"[Reddit RSS] r/{sub} failed: {resp.status_code}")
+                        continue
+                    
+                    import feedparser
+                    feed = feedparser.parse(resp.text)
+                    
+                    if not feed.entries:
+                        continue
+                    
+                    for entry in feed.entries:
+                        title = entry.get("title", "")
+                        # RSS 通常没有正文, 用 title + summary
+                        summary = entry.get("summary", "")
+                        full_text = f"{title} {summary}".lower()
+                        link = entry.get("link", "")
+                        score = 0
+                        
+                        # 过滤: 必须包含 niche 相关词
+                        if not any(w in full_text for w in niche_words):
+                            continue
+                        
+                        # 分类帖子类型
+                        post_type = "discussion"
+                        if any(kw in full_text for kw in pain_keywords):
+                            post_type = "pain_point"
+                        elif any(kw in full_text for kw in rec_keywords):
+                            post_type = "recommendation"
+                        elif any(kw in full_text for kw in complaint_keywords):
+                            post_type = "complaint"
+                        
+                        results.append({
+                            "type": post_type,
+                            "title": title[:200],
+                            "text": summary[:500] if summary else "",
+                            "subreddit": sub,
+                            "score": score,
+                            "url": link,
+                            "products_mentioned": [],
+                        })
+                        
+                        if len(results) >= limit:
+                            break
+                            
+                except Exception as e:
+                    print(f"[Reddit RSS] r/{sub} failed: {e}")
+                    continue
+                
+                if len(results) >= limit:
+                    break
+
+        # 备选: Google 搜索 site:reddit.com (如果 RSS 失败)
+        if len(results) < 3:
+            google_results = await self._fetch_reddit_via_google(niche, limit - len(results))
+            results.extend(google_results)
+
+        # 按类型优先级排序 (痛点和推荐优先)
+        type_priority = {"pain_point": 3, "recommendation": 2, "complaint": 2, "discussion": 1}
+        results.sort(key=lambda x: (type_priority.get(x["type"], 0), x["score"]), reverse=True)
+        
+        return results[:limit]
+
+    async def _fetch_reddit_via_google(self, niche: str, limit: int = 10) -> List[dict]:
+        """备选: 通过 Google 搜索 site:reddit.com 找到相关讨论"""
+        results = []
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                query = f"site:reddit.com \"{niche}\" (pain OR problem OR recommend OR review OR best)"
+                url = f"https://www.google.com/search?q={quote_plus(query)}"
+                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+                resp = await client.get(url, headers=headers)
+                if resp.status_code != 200:
+                    return []
+                
+                # 简单解析 HTML (实际可用 BeautifulSoup)
+                from html.parser import HTMLParser
+                import re
+                
+                # 提取搜索结果链接
+                links = re.findall(r'<a[^>]+href="/url\?q=([^&]+)', resp.text)
+                for link in links[:limit]:
+                    if "reddit.com/r/" in link and "/comments/" in link:
+                        results.append({
+                            "type": "discussion",
+                            "title": f"Reddit discussion about {niche}",
+                            "text": f"Found via Google search: {link}",
+                            "subreddit": "unknown",
+                            "score": 0,
+                            "url": link,
+                            "products_mentioned": [],
+                        })
+        except Exception:
+            pass
+        return results
+
+    async def _fetch_reddit_keywords(self, niche: str) -> List[dict]:
+        """从 Reddit 讨论中提取长尾关键词/痛点词"""
+        reddit_data = await self._fetch_reddit(niche, limit=20)
+        keywords = []
+        
+        for post in reddit_data:
+            # 从标题和正文提取潜在关键词
+            text = f"{post['title']} {post['text']}"
+            # 简单提取: 3-5 词短语
+            words = re.findall(r'\b[a-z]{3,}\b', text.lower())
+            # 组合成短语 (这里简化, 实际可用 RAKE/KeyBERT)
+            # 过滤停用词
+            stopwords = {"the", "and", "for", "with", "this", "that", "have", "has", "had", "was", "were", "been", "from", "they", "their", "there", "what", "when", "where", "which", "who", "whom", "your", "will", "would", "could", "should", "about", "after", "before", "because", "into", "than", "then", "very", "just", "like", "into", "over", "under", "again", "also", "only", "other", "than", "its", "our", "out", "use", "used", "using"}
+            filtered = [w for w in words if w not in stopwords and len(w) >= 4]
+            
+            # 简单频次统计生成关键词
+            from collections import Counter
+            freq = Counter(filtered)
+            for kw, count in freq.most_common(5):
+                if count >= 2:  # 至少出现 2 次
+                    keywords.append({
+                        "keyword": kw,
+                        "volume": 0,
+                        "kd": 0,
+                        "volume_provenance": "MISSING",
+                        "kd_provenance": "MISSING",
+                        "source": "reddit",
+                        "reddit_subreddit": post["subreddit"],
+                        "reddit_score": post["score"],
+                    })
+        
+        # 去重
+        seen = set()
+        unique = []
+        for kw in keywords:
+            if kw["keyword"] not in seen:
+                seen.add(kw["keyword"])
+                unique.append(kw)
+        
+        return unique[:15]
+
+    # ------------------------------------------------------------------
     # Google Trends(pytrends, REAL, 带 24h 缓存)
     # ------------------------------------------------------------------
     @staticmethod
@@ -447,38 +899,75 @@ class PublicFetcher:
             pass
 
     async def _fetch_google_trends(self, niche: str) -> dict:
-        """pytrends 获取 90 天趋势 + 上升相关词(真实)"""
+        """pytrends 获取 90 天趋势 + 上升相关词(真实) — 多策略兜底"""
         # 本地缓存,避免频繁被限流
         cached = self._load_trends_cache(niche)
         if cached:
             return cached
 
         self._patch_pytrends_urllib3()
+        
+        # 策略 1: 标准 12 个月 YoY
+        result = await self._fetch_trends_strategy(niche, timeframe='today 12-m', cat=0)
+        if result["yoy_pct"] != 0 or result["rising_kws"]:
+            self._save_trends_cache(niche, result)
+            return result
+        
+        # 策略 2: 过去 5 年长周期 (对季节性品类更稳)
+        result = await self._fetch_trends_strategy(niche, timeframe='today 5-y', cat=0)
+        if result["yoy_pct"] != 0 or result["rising_kws"]:
+            self._save_trends_cache(niche, result)
+            return result
+        
+        # 策略 3: 尝试购物属性搜索
+        result = await self._fetch_trends_strategy(niche, timeframe='today 12-m', cat=0, gprop='froogle')
+        if result["yoy_pct"] != 0 or result["rising_kws"]:
+            self._save_trends_cache(niche, result)
+            return result
+        
+        # 策略 4: 尝试 YouTube 搜索趋势 (产品类视频搜索)
+        result = await self._fetch_trends_strategy(niche, timeframe='today 12-m', cat=0, gprop='youtube')
+        if result["yoy_pct"] != 0 or result["rising_kws"]:
+            self._save_trends_cache(niche, result)
+            return result
+
+        # 全部失败返回空
+        return {"yoy_pct": 0, "rising_kws": []}
+
+    async def _fetch_trends_strategy(self, niche: str, timeframe: str = 'today 12-m', cat: int = 0, gprop: str = '') -> dict:
+        """单策略 Trends 抓取"""
         try:
             from pytrends.request import TrendReq
 
             pytrends = TrendReq(hl='en-US', tz=360, timeout=(10, 25), retries=2, backoff_factor=0.5)
-            # 12 个月窗口: 对比最近 90 天 vs 前 90 天(排除 0 值噪声, 平滑季节性)
-            pytrends.build_payload([niche], cat=0, timeframe='today 12-m', geo='US', gprop='')
+            pytrends.build_payload([niche], cat=cat, timeframe=timeframe, geo='US', gprop=gprop)
 
             interest_df = pytrends.interest_over_time()
             yoy_pct = 0
             if interest_df is not None and not interest_df.empty and niche in interest_df.columns:
                 series = interest_df[niche].dropna()
-                # 注意: 'today 12-m' 返回周粒度(~52 行); 90 天 ≈ 13 周
                 if len(series) >= 26:
                     def _nonzero_mean(arr):
                         nz = arr[arr > 0]
                         return float(nz.mean()) if len(nz) >= 4 else 0.0
 
-                    recent = _nonzero_mean(series.tail(13).values)    # 最近 ~90 天
-                    older = _nonzero_mean(series.iloc[-26:-13].values)  # 之前 ~90 天
-                    if older > 1:  # 旧期均值过小(<1)视为数据不足, 不算暴跌
-                        yoy_pct = (recent - older) / older * 100
-                    elif recent > 0 and older == 0:
-                        yoy_pct = 100.0  # 旧期无数据, 近期有 → 新兴趋势
+                    # 根据时间窗口动态调整比较期长度
+                    if timeframe == 'today 5-y':
+                        recent_window = 26  # 最近 ~6个月
+                        older_window = 52   # 前 ~6个月
+                    else:
+                        recent_window = 13  # 最近 ~90天
+                        older_window = 26   # 前 ~90天
+                    
+                    if len(series) >= recent_window + older_window:
+                        recent = _nonzero_mean(series.tail(recent_window).values)
+                        older = _nonzero_mean(series.iloc[-(recent_window + older_window):-recent_window].values)
+                        if older > 1:
+                            yoy_pct = (recent - older) / older * 100
+                        elif recent > 0 and older == 0:
+                            yoy_pct = 100.0
 
-            # 上升相关词(REAL, 来自 Trends) — 429 限流频繁, 重试退避
+            # 上升相关词
             rising_kws = []
             related = None
             for attempt in range(3):
@@ -488,11 +977,10 @@ class PublicFetcher:
                 except Exception as e:
                     print(f"[Trends] related_queries attempt {attempt+1}/3 failed: {e}")
                     if attempt < 2:
-                        await asyncio.sleep(5 * (attempt + 1))  # 5s, 10s
+                        await asyncio.sleep(5 * (attempt + 1))
             if related and niche in related:
                 r = related[niche]
                 if isinstance(r, dict):
-                    # rising(上升词, 趋势信号); top(相关词, 仅作长尾词池, 不触发趋势)
                     rising_df = r.get("rising")
                     if rising_df is not None and hasattr(rising_df, "to_dict") and not rising_df.empty:
                         for _, row in rising_df.head(10).iterrows():
@@ -506,7 +994,6 @@ class PublicFetcher:
                                 "trending_provenance": "REAL",
                             })
                     else:
-                        # 无 rising 数据(短语搜索量不足) → 用 top 相关词补长尾池
                         top_df = r.get("top")
                         if top_df is not None and hasattr(top_df, "to_dict") and not top_df.empty:
                             for _, row in top_df.head(10).iterrows():
@@ -514,20 +1001,18 @@ class PublicFetcher:
                                     "keyword": str(row.get("query", "")),
                                     "volume": 0,
                                     "kd": 0,
-                                    "trending_value": 0.0,  # top 词无趋势值, 不触发通道2
+                                    "trending_value": 0.0,
                                     "volume_provenance": "MISSING",
                                     "kd_provenance": "MISSING",
                                     "trending_provenance": "REAL",
                                 })
 
-            result = {
+            return {
                 "yoy_pct": round(yoy_pct, 1),
                 "rising_kws": rising_kws,
             }
-            self._save_trends_cache(niche, result)
-            return result
         except Exception as e:
-            print(f"[Trends] fetch failed: {e}")
+            print(f"[Trends] strategy {timeframe} failed: {e}")
             return {"yoy_pct": 0, "rising_kws": []}
 
     # ------------------------------------------------------------------

@@ -41,3 +41,7 @@ class RawProductData:
     estimated_ltv_orders: float = 0.0
     # Cost estimate (for public fetcher)
     cost_estimate: Optional[object] = None
+    # Reddit signals (REAL 用户讨论)
+    reddit_pain_points: List[dict] = field(default_factory=list)
+    reddit_recommendations: List[dict] = field(default_factory=list)
+    reddit_complaints: List[dict] = field(default_factory=list)

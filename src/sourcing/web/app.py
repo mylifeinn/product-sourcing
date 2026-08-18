@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import asyncio
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import List, Optional
@@ -15,7 +16,8 @@ from sourcing.database import get_all_candidates, get_candidate, init_db, update
 from sourcing.pipeline.score import score_candidate
 from sourcing.pipeline.enrich import enrich_candidate
 from sourcing.compliance.check import run_compliance_check
-from sourcing.config import load_config
+from sourcing.config import load_config, get_config
+from sourcing.pipeline.fetch import fetch_niche
 
 
 @asynccontextmanager
@@ -64,6 +66,8 @@ async def dashboard(
     per_page: int = Query(20, ge=5, le=200),
 ):
     candidates = get_all_candidates(limit=500)
+    config = get_config()
+    seed_niches = list(config.seed_niches)
     
     # Enrich and score all for display
     enriched = []
@@ -118,6 +122,8 @@ async def dashboard(
         "page": page,
         "per_page": per_page,
         "total_pages": total_pages,
+        "seed_niches": seed_niches,
+        "data_sources": config.data_sources,
     })
 
 
@@ -181,6 +187,203 @@ async def api_candidates(status: Optional[str] = None, limit: int = 100):
     else:
         candidates = get_all_candidates(limit)
     return [{"id": c.id, "title": c.title, "niche": c.niche, "score": c.total_score, "passed": c.passed_all_gates, "status": c.review_status} for c in candidates]
+
+
+@app.post("/fetch")
+async def fetch_products(
+    request: Request,
+    niche: str = Form(...),
+    source: str = Form("public"),
+    limit: int = Form(20),
+):
+    """Trigger product fetching from dashboard"""
+    # Validate source against config
+    config = get_config()
+    valid_sources = [ds["name"] for ds in config.data_sources if ds.get("enabled", True)]
+    if source not in valid_sources:
+        return {"success": False, "error": f"无效的数据源: {source}，支持: {', '.join(valid_sources)}"}
+
+    import time
+    import uuid
+    start_time = time.time()
+    task_id = str(uuid.uuid4())[:8]
+
+    try:
+        print(f"[FETCH {task_id}] Starting fetch for niche='{niche}', source='{source}', limit={limit}")
+
+        # Validate inputs
+        if not niche or not niche.strip():
+            return {"success": False, "error": "品类关键词不能为空"}
+
+        limit = max(1, min(limit, 50))  # Clamp to 1-50
+        
+        # Step 1: Fetch raw candidates
+        print(f"[FETCH {task_id}] Step 1/5: Fetching raw candidates...")
+        candidates = await fetch_niche(niche.strip(), source, limit)
+        fetch_time = time.time() - start_time
+        print(f"[FETCH {task_id}] Step 1 done: got {len(candidates)} raw candidates in {fetch_time:.1f}s")
+        
+        if not candidates:
+            return {"success": True, "count": 0, "message": f"未找到 '{niche}' 的候选产品（可能被反爬或无结果），建议尝试其他关键词或稍后再试", "task_id": task_id}
+        
+        # Step 2: Enrich
+        print(f"[FETCH {task_id}] Step 2/5: Enriching candidates...")
+        enrich_start = time.time()
+        from sourcing.pipeline.enrich import enrich_candidates
+        candidates = enrich_candidates(candidates)
+        print(f"[FETCH {task_id}] Step 2 done in {time.time() - enrich_start:.1f}s")
+        
+        # Step 3: Score
+        print(f"[FETCH {task_id}] Step 3/5: Scoring candidates...")
+        score_start = time.time()
+        from sourcing.pipeline.score import score_candidates
+        candidates = score_candidates(candidates)
+        print(f"[FETCH {task_id}] Step 3 done in {time.time() - score_start:.1f}s")
+        
+        # Step 4: Dedup
+        print(f"[FETCH {task_id}] Step 4/5: Deduplicating...")
+        dedup_start = time.time()
+        from sourcing.pipeline.dedup import dedup_candidates
+        candidates = dedup_candidates(candidates)
+        print(f"[FETCH {task_id}] Step 4 done in {time.time() - dedup_start:.1f}s")
+        
+        # Step 5: Compliance
+        print(f"[FETCH {task_id}] Step 5/5: Compliance check...")
+        compliance_start = time.time()
+        from sourcing.compliance.check import run_compliance_checks
+        candidates = run_compliance_checks(candidates)
+        print(f"[FETCH {task_id}] Step 5 done in {time.time() - compliance_start:.1f}s")
+        
+        # Persist to database
+        print(f"[FETCH {task_id}] Persisting {len(candidates)} candidates to database...")
+        from sourcing.database import upsert_candidate
+        for c in candidates:
+            upsert_candidate(c)
+        
+        # Export to Notion
+        print(f"[FETCH {task_id}] Syncing to Notion...")
+        from sourcing.notion.sync import NotionSync
+        notion = NotionSync()
+        if notion.client:
+            notion.bulk_upsert(candidates)
+            print(f"[FETCH {task_id}] Notion sync done")
+        else:
+            print(f"[FETCH {task_id}] Notion not configured, skipping")
+        
+        total_time = time.time() - start_time
+        passed = sum(1 for c in candidates if c.passed_all_gates)
+        msg = f"✅ 完成！耗时 {total_time:.1f}s：抓取 {len(candidates)} 个候选，{passed} 个全通过 9 门槛"
+        print(f"[FETCH {task_id}] {msg}")
+        
+        return {"success": True, "count": len(candidates), "message": msg, "passed_all": passed, "elapsed_sec": round(total_time, 1), "task_id": task_id}
+        
+    except asyncio.TimeoutError:
+        return {"success": False, "error": "请求超时（>120s），建议减少抓取数量或稍后重试", "task_id": task_id}
+    except Exception as e:
+        import traceback
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        print(f"[FETCH {task_id}] ERROR: {error_msg}")
+        print(traceback.format_exc())
+        return {"success": False, "error": error_msg, "task_id": task_id}
+
+
+# Progress tracking for long-running fetches
+_fetch_progress = {}
+
+@app.post("/fetch/start")
+async def fetch_start(
+    request: Request,
+    niche: str = Form(...),
+    source: str = Form("public"),
+    limit: int = Form(20),
+):
+    """Start async fetch, return task_id for polling"""
+    # Validate source against config
+    config = get_config()
+    valid_sources = [ds["name"] for ds in config.data_sources if ds.get("enabled", True)]
+    if source not in valid_sources:
+        return {"error": f"无效的数据源: {source}，支持: {', '.join(valid_sources)}"}
+
+    import uuid
+    task_id = str(uuid.uuid4())
+    _fetch_progress[task_id] = {"status": "starting", "step": 0, "message": "初始化...", "result": None}
+
+    # Run in background
+    asyncio.create_task(_run_fetch_task(task_id, niche, source, limit))
+
+    return {"task_id": task_id}
+
+
+async def _run_fetch_task(task_id: str, niche: str, source: str, limit: int):
+    import time
+    start_time = time.time()
+
+    def update(step: int, message: str):
+        _fetch_progress[task_id] = {"status": "running", "step": step, "message": message, "result": None}
+
+    try:
+        update(0, "验证参数...")
+        if not niche or not niche.strip():
+            _fetch_progress[task_id] = {"status": "error", "step": 0, "message": "品类关键词不能为空", "result": None}
+            return
+        config = get_config()
+        valid_sources = [ds["name"] for ds in config.data_sources if ds.get("enabled", True)]
+        if source not in valid_sources:
+            _fetch_progress[task_id] = {"status": "error", "step": 0, "message": f"无效数据源: {source}", "result": None}
+            return
+        limit = max(1, min(limit, 50))
+        
+        update(1, "步骤 1/5: 抓取原始候选...")
+        candidates = await fetch_niche(niche.strip(), source, limit)
+        if not candidates:
+            _fetch_progress[task_id] = {"status": "done", "step": 5, "message": f"未找到 '{niche}' 的候选产品", "result": {"success": True, "count": 0, "passed_all": 0, "elapsed_sec": round(time.time() - start_time, 1)}}
+            return
+        
+        update(2, f"步骤 2/5: 富化 {len(candidates)} 个候选...")
+        from sourcing.pipeline.enrich import enrich_candidates
+        candidates = enrich_candidates(candidates)
+        
+        update(3, "步骤 3/5: 评分...")
+        from sourcing.pipeline.score import score_candidates
+        candidates = score_candidates(candidates)
+        
+        update(4, "步骤 4/5: 去重...")
+        from sourcing.pipeline.dedup import dedup_candidates
+        candidates = dedup_candidates(candidates)
+        
+        update(5, "步骤 5/5: 合规检查...")
+        from sourcing.compliance.check import run_compliance_checks
+        candidates = run_compliance_checks(candidates)
+        
+        update(5, "落库...")
+        from sourcing.database import upsert_candidate
+        for c in candidates:
+            upsert_candidate(c)
+        
+        update(5, "同步 Notion...")
+        from sourcing.notion.sync import NotionSync
+        notion = NotionSync()
+        if notion.client:
+            notion.bulk_upsert(candidates)
+        
+        total_time = time.time() - start_time
+        passed = sum(1 for c in candidates if c.passed_all_gates)
+        msg = f"✅ 完成！耗时 {total_time:.1f}s：抓取 {len(candidates)} 个候选，{passed} 个全通过 9 门槛"
+        _fetch_progress[task_id] = {"status": "done", "step": 5, "message": msg, "result": {"success": True, "count": len(candidates), "passed_all": passed, "elapsed_sec": round(total_time, 1), "message": msg}}
+        
+    except Exception as e:
+        import traceback
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        print(f"[FETCH {task_id}] ERROR: {error_msg}")
+        print(traceback.format_exc())
+        _fetch_progress[task_id] = {"status": "error", "step": 0, "message": error_msg, "result": None}
+
+@app.get("/fetch/progress/{task_id}")
+async def fetch_progress(task_id: str):
+    """Poll fetch progress"""
+    if task_id not in _fetch_progress:
+        return {"status": "not_found", "message": "任务不存在或已过期"}
+    return _fetch_progress[task_id]
 
 
 if __name__ == "__main__":

@@ -42,6 +42,7 @@ class CostEstimator:
     """
 
     # 不同渠道的典型倍率范围
+    # 针对不同价格段调整: 高客单价产品批发倍率通常较低(品牌溢价大)
     CHANNEL_MULTIPLIERS = {
         "amazon": (3.5, 5.0),      # FBA 费用高，倍率大
         "shopify": (3.0, 4.5),     # DTC 无平台抽成，倍率小
@@ -49,6 +50,17 @@ class CostEstimator:
         "shein": (2.5, 4.0),
         "alibaba": (1.5, 3.0),     # 批发平台直接拿货
         "unknown": (3.0, 5.0),
+    }
+    
+    # 高 AOV 产品的调整倍率 (零售价 ≥ $60 时适用)
+    # 高端品牌通常零售价/批发价 = 2.5-3.5x (而非 3.5-5x)
+    HIGH_AOV_MULTIPLIERS = {
+        "amazon": (2.5, 3.5),
+        "shopify": (2.2, 3.2),
+        "temu": (2.0, 3.0),
+        "shein": (2.0, 3.0),
+        "alibaba": (1.3, 2.2),
+        "unknown": (2.0, 3.5),
     }
 
     # 物流成本表（USD，基于重量档位）
@@ -69,6 +81,12 @@ class CostEstimator:
     def __init__(self):
         self.config = get_config()
 
+    def _get_multipliers(self, competitor_source: str, retail_price: float):
+        """根据价格段选择倍率表"""
+        if retail_price >= 60:  # 高 AOV
+            return self.HIGH_AOV_MULTIPLIERS.get(competitor_source.lower(), self.HIGH_AOV_MULTIPLIERS["unknown"])
+        return self.CHANNEL_MULTIPLIERS.get(competitor_source.lower(), self.CHANNEL_MULTIPLIERS["unknown"])
+
     def estimate_shipping(self, weight_g: float) -> float:
         """根据重量估算物流成本"""
         for (w_min, w_max), cost in self.SHIPPING_COST_TABLE.items():
@@ -84,7 +102,7 @@ class CostEstimator:
                  is_fba: bool = False) -> CostEstimate:
         """主入口"""
 
-        multipliers = self.CHANNEL_MULTIPLIERS.get(competitor_source.lower(), self.CHANNEL_MULTIPLIERS["unknown"])
+        multipliers = self._get_multipliers(competitor_source, competitor_retail_price_usd)
         mult_min, mult_max = multipliers
 
         # 1. 反推批发价区间 (CNY -> USD 汇率 7.2)

@@ -22,6 +22,8 @@ dependencies = [
     "fastapi",
     "uvicorn",
     "pandas",
+    "python-multipart",
+    "feedparser",
 ]
 
 [project.optional-dependencies]

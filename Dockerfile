@@ -5,6 +5,19 @@ FROM python:3.11-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     git \
+    libnss3 \
+    libnspr4 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libasound2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv
@@ -15,9 +28,14 @@ WORKDIR /app
 
 # Copy dependency files first (for caching)
 COPY pyproject.toml ./
+COPY uv.lock ./
+COPY README.md ./
 
 # Install dependencies
 RUN uv sync --frozen --no-dev
+
+# Install Playwright browsers
+RUN uv run playwright install chromium
 
 # Copy application code
 COPY src/ ./src/

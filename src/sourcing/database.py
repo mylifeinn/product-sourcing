@@ -96,6 +96,7 @@ MIGRATIONS = [
     ("amazon_bsr", "ALTER TABLE candidates ADD COLUMN amazon_bsr INTEGER DEFAULT 0"),
     ("amazon_result_count", "ALTER TABLE candidates ADD COLUMN amazon_result_count INTEGER DEFAULT 0"),
     ("amazon_duplicate_count", "ALTER TABLE candidates ADD COLUMN amazon_duplicate_count INTEGER DEFAULT -1"),
+    ("source", "ALTER TABLE candidates ADD COLUMN source TEXT DEFAULT ''"),
 ]
 
 

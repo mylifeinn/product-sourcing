@@ -15,65 +15,70 @@ class ProductCandidate:
     title: str = ""
     niche: str = ""
     pain_point_keywords: list[str] = field(default_factory=list)
-    
+
     # Gate 1: Pain Point
     trend_score: float = 0.0
     longtail_keywords: list[dict] = field(default_factory=list)  # [{kw, volume, kd}]
-    
+
     # Gate 2: Trend
     google_trends_yoy_pct: float = 0.0
     tiktok_hashtag_growth_pct: float = 0.0
     # Amazon 单品趋势数据 [REAL]
     amazon_bsr: int = 0  # Best Sellers Rank(详情页 REAL)
     amazon_result_count: int = 0  # niche 搜索结果总数(搜索页 REAL, Gate1 volume 代理)
-    
+
     # Gate 3: Margin
     wholesale_price_usd: float = 0.0
     estimated_retail_price_usd: float = 0.0
     estimated_shipping_usd: float = 0.0
     estimated_margin_pct: float = 0.0
-    
+
     # Gate 4: Lightweight
     weight_g: float = 0.0
     dimensions_cm: tuple[float, float, float] = (0, 0, 0)
     shipping_channel: str = ""
-    
+
     # Gate 5: Quality
     supplier_rating: float = 0.0
     refund_rate_pct: float = 0.0
     has_actual_photos: bool = False
     supplier_url: str = ""
     supplier_contact: str = ""
-    
+
     # Gate 6: Uniqueness
     uniqueness_passed: bool = False
     competitor_urls: list[str] = field(default_factory=list)
     amazon_duplicate_count: int = -1  # Amazon 前3页同款数(-1=未检测, >=0=REAL 检测结果)
-    
+
     # Gate 7: Seasonality
     is_evergreen: bool = True
     seasonal_peak_window_days: int = 0
     prep_lead_time_days: int = 0
-    
+
     # Gate 8: Market Proof
     competitor_sales_90d: int = 0
     competitor_reviews: int = 0
     market_proof_urls: list[str] = field(default_factory=list)
     amazon_rating: float = 0.0  # Amazon 竞品评分 [REAL], 免费模式 Gate5 质量代理
-    
+
     # Gate 9: Customer Value
     estimated_aov_usd: float = 0.0
     estimated_repurchase_cycle_days: int = 0
     estimated_ltv_orders: float = 0.0
-    
+
     # Metadata
     source: str = ""  # 数据来源标识
-    
+
+    # Reddit signals (REAL 用户讨论)
+    reddit_pain_points: list[dict] = field(default_factory=list)
+    reddit_recommendations: list[dict] = field(default_factory=list)
+    reddit_complaints: list[dict] = field(default_factory=list)
+
     # Compliance
     patent_risk_level: str = "none"  # none, low, high
     trademark_risk_level: str = "none"
     matched_patents: list[str] = field(default_factory=list)
-    
+
     # Scoring
     gate_results: dict[str, bool] = field(default_factory=dict)
     gate_details: dict[str, str] = field(default_factory=dict)  # 每个 gate 的判定依据说明
@@ -82,21 +87,21 @@ class ProductCandidate:
     needs_manual_review: bool = False  # 有数据不足的 gate, 需人工补充确认
     data_completeness_pct: float = 0.0  # REAL/ESTIMATED 字段占比
     data_provenance: dict[str, str] = field(default_factory=dict)  # 字段→REAL/ESTIMATED/MISSING
-    
+
     # Review
     review_status: str = "pending"  # pending, approved, rejected, waived
     review_notes: str = ""
     rank: int = 0  # Notion 同步序号(按 score 降序) — 不入库, 仅同步用
-    
+
     # Shopify
     shopify_draft_id: Optional[int] = None
     shopify_product_id: Optional[int] = None
     published_at: Optional[datetime] = None
-    
+
     # Timestamps
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
-    
+
     def to_notion_properties(self) -> dict:
         """Convert to Notion API properties format"""
         # gate 三态中 None(数据不足) → Notion checkbox 只接受 bool, 转 False
@@ -134,11 +139,11 @@ class ProductCandidate:
             "审核状态": {"select": {"name": self.review_status}},
             "审核备注": {"rich_text": [{"text": {"content": self.review_notes}}]},
         }
-    
+
     def to_shopify_draft(self, brand_config: dict) -> dict:
         """Convert to Shopify Draft Product payload"""
         from sourcing.seo.template import render_product_description
-        
+
         body_html = render_product_description(
             title=self.title,
             niche=self.niche,
@@ -152,10 +157,10 @@ class ProductCandidate:
             usp_framework=brand_config.get("usp_framework", ""),
             trust_anchors=brand_config.get("trust_anchors", ""),
         )
-        
+
         # Use first pain point keyword for SEO description
         first_pain = self.pain_point_keywords[0] if self.pain_point_keywords else "核心痛点"
-        
+
         return {
             "product": {
                 "title": self.title,
@@ -250,7 +255,8 @@ class CandidateDB(BaseModel):
     published_at: Optional[datetime]
     created_at: datetime
     updated_at: datetime
-    
+    source: str = ""  # 数据来源标识
+
     @classmethod
     def from_candidate(cls, c: ProductCandidate) -> "CandidateDB":
         return cls(
@@ -306,8 +312,9 @@ class CandidateDB(BaseModel):
             published_at=c.published_at,
             created_at=c.created_at,
             updated_at=c.updated_at,
+            source=c.source,
         )
-    
+
     def to_candidate(self) -> ProductCandidate:
         c = ProductCandidate()
         c.id = self.id
@@ -362,4 +369,5 @@ class CandidateDB(BaseModel):
         c.published_at = self.published_at
         c.created_at = self.created_at
         c.updated_at = self.updated_at
+        c.source = self.source
         return c

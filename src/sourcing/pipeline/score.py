@@ -34,13 +34,19 @@ def score_candidate(candidate: ProductCandidate) -> ProductCandidate:
     #   1. 有真实 volume/KD → 严格判定
     #   2. 无 volume 但有 Amazon 搜索结果总数(REAL volume 代理, 与月搜索量强相关)
     #      → result_count ≥ min_monthly_search 且长尾词数达标 → 通过; 否则不通过
-    #   3. 全缺失 → 宽松判定(真实关键词数 + 真实趋势信号), 标注需复核
+    #   3. 有 Reddit 真实痛点讨论 → 宽松通过 (用户真实抱怨 = 真实痛点)
+    #   4. 全缺失 → 宽松判定(真实关键词数 + 真实趋势信号), 标注需复核
     # ------------------------------------------------------------------
     longtail = candidate.longtail_keywords or []
     has_real_volume = any(kw.get("volume_provenance") not in (None, "", "MISSING", "MOCK") for kw in longtail)
     min_words = gates.gate_1_pain_point_keywords.get("min_longtail_keywords", 3)
     min_vol = gates.gate_1_pain_point_keywords.get("min_monthly_search", 500)
     max_kd = gates.gate_1_pain_point_keywords.get("max_keyword_difficulty", 30)
+    
+    # Reddit 痛点信号 (REAL 用户讨论)
+    reddit_pain_count = len(getattr(candidate, "reddit_pain_points", []))
+    reddit_rec_count = len(getattr(candidate, "reddit_recommendations", []))
+    reddit_complaint_count = len(getattr(candidate, "reddit_complaints", []))
 
     if has_real_volume:
         qualifying = [
@@ -60,6 +66,12 @@ def score_candidate(candidate: ProductCandidate) -> ProductCandidate:
                      f"Amazon 搜索词结果 {candidate.amazon_result_count} (代理 vol≥{min_vol}: "
                      f"{'✅' if count_ok else '❌'}), 长尾词 {len(longtail)}/{min_words} "
                      "[volume=REAL代理, 长尾词=REAL]")
+    elif reddit_pain_count >= 2 or (reddit_pain_count >= 1 and reddit_rec_count >= 1):
+        # Reddit 真实痛点讨论 + 推荐 = 真实痛点存在
+        results["gate_1"] = True
+        _gate_detail(results, "gate_1",
+                     f"Reddit 痛点贴 {reddit_pain_count} 个 + 推荐贴 {reddit_rec_count} 个 "
+                     "[REAL-用户真实讨论, 宽松通过]")
     elif len(longtail) >= min_words and (
         candidate.google_trends_yoy_pct > 0 or candidate.tiktok_hashtag_growth_pct > 0
     ):
@@ -71,14 +83,15 @@ def score_candidate(candidate: ProductCandidate) -> ProductCandidate:
     else:
         results["gate_1"] = False
         _gate_detail(results, "gate_1",
-                     f"长尾词 {len(longtail)} 个, 无 volume/结果数/趋势信号 → 不通过")
+                     f"长尾词 {len(longtail)} 个, Reddit痛点 {reddit_pain_count} 个, 无 volume/结果数/趋势信号 → 不通过")
 
     # ------------------------------------------------------------------
     # Gate 2: Trend(趋势) — 多通道解耦
     # 通道1(REAL): 头词 Google Trends YoY ≥ 20%
     # 通道2(REAL): Trends rising queries 中显著上升长尾词 ≥ N 个(头词跌但长尾涨 → 过)
     # 通道3(REAL): BSR 快照历史改善 ≥ 30%(单品排名上升 → 过; 恶化 → 明确不通过)
-    # 数据缺失(无趋势信号、无上升词、无 BSR 历史) → None, 需人工
+    # 通道4(REAL): Reddit 讨论活跃度(痛点贴+推荐贴 ≥ N)→ 视为趋势上升信号
+    # 数据缺失(无趋势信号、无上升词、无 BSR 历史、无 Reddit 信号) → None, 需人工
     # ------------------------------------------------------------------
     trend_cfg = gates.gate_2_trend
     yoy_min = trend_cfg.get("google_trends_90d_yoy_min_pct", 20)
@@ -86,6 +99,7 @@ def score_candidate(candidate: ProductCandidate) -> ProductCandidate:
     min_rising_val = trend_cfg.get("min_rising_value", 100)
     bsr_improve_pct = trend_cfg.get("bsr_improvement_pct", 30) / 100.0
     bsr_min_span = trend_cfg.get("bsr_min_span_days", 14)
+    reddit_trend_min = trend_cfg.get("reddit_trend_min_posts", 3)  # Reddit 活跃阈值
 
     yoy = candidate.google_trends_yoy_pct
     rising_kws = [
@@ -96,6 +110,11 @@ def score_candidate(candidate: ProductCandidate) -> ProductCandidate:
         kw for kw in rising_kws
         if kw.get("trending_value", 0) >= min_rising_val
     ]
+    
+    # Reddit 趋势信号
+    reddit_pain_count = len(getattr(candidate, "reddit_pain_points", []))
+    reddit_rec_count = len(getattr(candidate, "reddit_recommendations", []))
+    reddit_total_discussion = reddit_pain_count + reddit_rec_count
 
     if yoy >= yoy_min:
         results["gate_2"] = True
@@ -107,6 +126,12 @@ def score_candidate(candidate: ProductCandidate) -> ProductCandidate:
                      f"头词 YoY {yoy:.1f}%(未达{yoy_min}%), 但上升长尾词 "
                      f"{len(significant_rising)}/{min_rising_kws} 个显著上涨 "
                      f"(值≥{min_rising_val}) [REAL-长尾通道]")
+    elif reddit_total_discussion >= reddit_trend_min:
+        # Reddit 活跃讨论 = 趋势信号
+        results["gate_2"] = True
+        _gate_detail(results, "gate_2",
+                     f"Reddit 活跃讨论 {reddit_total_discussion} 条(痛点{reddit_pain_count}+推荐{reddit_rec_count}) "
+                     f"≥ {reddit_trend_min} [REAL-Reddit趋势信号]")
     else:
         # BSR 历史通道(需跨日快照, cron 跑几天后自动生效)
         asin = ""
@@ -123,26 +148,27 @@ def score_candidate(candidate: ProductCandidate) -> ProductCandidate:
             _gate_detail(results, "gate_2",
                          f"BSR {old_bsr}→{new_bsr} 改善 {improvement*100:.0f}% "
                          f"(需≥{bsr_improve_pct*100:.0f}%) [REAL-BSR历史]")
-        elif yoy < 0:
-            # 明确下跌: 头词跌且无显著上升词/BSR 改善
+        elif yoy < -30:
+            # 明确大幅下跌: 头词跌且无显著上升词/BSR 改善/Reddit 信号
             results["gate_2"] = False
             _gate_detail(results, "gate_2",
-                         f"头词 YoY {yoy:.1f}%(下跌), 上升词 {len(significant_rising)} 个, "
-                         "无 BSR 历史 → 不通过 [REAL]")
+                         f"头词 YoY {yoy:.1f}%(大幅下跌), 上升词 {len(significant_rising)} 个, "
+                         f"Reddit讨论 {reddit_total_discussion} 条, 无 BSR 历史 → 不通过 [REAL]")
         elif yoy > 0 and not rising_kws:
             results["gate_2"] = False
             _gate_detail(results, "gate_2",
                          f"头词 YoY {yoy:.1f}% 但未达 {yoy_min}%, 无上升词数据 → 不通过 [REAL]")
-        elif yoy == 0 and not rising_kws:
+        elif yoy == 0 and not rising_kws and reddit_total_discussion == 0:
             # 无任何趋势信号 → 数据不足, 不武断判定
             results["gate_2"] = None
             _gate_detail(results, "gate_2",
-                         "Trends 数据缺失(YoY=0 且无上升词) → 数据不足, 需人工 [MISSING]")
+                         "Trends 数据缺失(YoY=0 且无上升词), 无 Reddit 讨论 → 数据不足, 需人工 [MISSING]")
         else:
-            results["gate_2"] = False
+            # 轻微下跌或有少量信号 → 数据不足而非明确不通过
+            results["gate_2"] = None
             _gate_detail(results, "gate_2",
-                         f"头词 YoY {yoy:.1f}%(未达{yoy_min}%), 上升词 {len(significant_rising)} 个 "
-                         f"(需≥{min_rising_kws}) → 不通过 [REAL]")
+                         f"头词 YoY {yoy:.1f}%(轻微下跌/平稳), 上升词 {len(significant_rising)} 个, "
+                         f"Reddit讨论 {reddit_total_discussion} 条 → 趋势信号不足, 需人工确认 [MISSING]")
 
     # ------------------------------------------------------------------
     # Gate 3: Margin(毛利, ESTIMATED - 基于真实竞品价反推)
