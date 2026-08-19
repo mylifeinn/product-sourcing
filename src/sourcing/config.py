@@ -162,8 +162,17 @@ def load_config() -> tuple[PipelineConfig, Settings]:
     # data_sources 也在 YAML 顶层，单独合并
     if raw.get("data_sources"):
         pipeline.data_sources = list(raw["data_sources"])
+    # 其余顶层段(wholesale/keepa 等)同样在 pipeline: 之外, 合并进对应子模型。
+    # 否则子模型默认值永远生效——曾导致 wholesale 明明配了 false 却按默认 True
+    # 启用 AliExpress/Alibaba 爬虫, 三路 Chromium 并发把小机器压死。
+    for key, value in raw.items():
+        if key in ("pipeline", "seed_niches", "data_sources") or not isinstance(value, dict):
+            continue
+        sub = getattr(pipeline, key, None)
+        if isinstance(sub, BaseModel):
+            setattr(pipeline, key, sub.model_copy(update=value))
     settings = Settings()
-    
+
     return pipeline, settings
 
 

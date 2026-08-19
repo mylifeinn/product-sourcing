@@ -241,7 +241,11 @@ class PublicFetcher:
                                  attempt: int, max_retries: int, progress_callback=None) -> List[dict]:
         """单次尝试: 加载搜索页并解析。返回产品列表(可能为空, 空则由调用方决定重试)。"""
         products = []
-        context, page = await self._new_amazon_context(browser)
+        context, warmup_page = await self._new_amazon_context(browser)
+        # 预热页用完即关, 搜索用新页面 —— 复用预热页会在预热导航未完成时
+        # 触发 "interrupted by another navigation" 竞态
+        await warmup_page.close()
+        page = await context.new_page()
         try:
             if progress_callback:
                 progress_callback(1, f"加载搜索页面 (尝试 {attempt}/{max_retries} 次)...")
