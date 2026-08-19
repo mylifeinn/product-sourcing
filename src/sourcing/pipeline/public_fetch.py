@@ -59,12 +59,18 @@ class PublicFetcher:
         """
         results = []
 
-        # 1. Amazon 搜索页(真实)
-        amazon_products = await self._fetch_amazon(niche, limit, progress_callback)
-
-        # 2. Amazon 详情页增强: BSR / Item Weight / Product Dimensions(真实,限速)
-        if amazon_products:
-            amazon_products = await self._enrich_amazon_details(amazon_products, max_details=min(6, limit))
+        # 1+2. Amazon 搜索页 + 详情页增强共用一个浏览器实例
+        # (小机器上重复 launch/close Chromium 是 CPU 尖峰和内存翻倍的主因)
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, args=self._browser_launch_args())
+            try:
+                amazon_products = await self._fetch_amazon(niche, limit, progress_callback, browser=browser)
+                if amazon_products:
+                    amazon_products = await self._enrich_amazon_details(
+                        amazon_products, max_details=min(6, limit), browser=browser
+                    )
+            finally:
+                await browser.close()
 
         # 3. 关键词: Google Suggest(REAL 关键词) + Trends rising(REAL) + Reddit 痛点/推荐
         suggest_kws, trends_data, reddit_data = await asyncio.gather(
@@ -157,182 +163,66 @@ class PublicFetcher:
 
     @staticmethod
     def _browser_launch_args():
+        """低资源启动参数: 2核/1GB 小机器上跑, 必须压住 Chromium 的 CPU/内存。
+
+        - --renderer-process-limit=1 + 禁 site isolation: 所有页面共享 1 个渲染进程
+          (默认每站点一个进程, 开 N 个 tab 就 N 份内存)
+        - --disable-gpu: 无头模式不需要 GPU 合成, 省 CPU
+        - 其余关闭后台网络/同步等不必要活动
+        """
         return [
             "--disable-blink-features=AutomationControlled",
             "--no-sandbox",
             "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--renderer-process-limit=1",
+            "--disable-site-isolation-trials",
+            "--disable-features=site-per-process,IsolateOrigins,Translate,BackForwardCache",
+            "--disable-background-networking",
+            "--disable-sync",
+            "--disable-default-apps",
+            "--disable-extensions",
+            "--mute-audio",
         ]
 
-    async def _fetch_amazon(self, niche: str, limit: int, progress_callback=None) -> List[dict]:
+    async def _fetch_amazon(self, niche: str, limit: int, progress_callback=None, browser=None) -> List[dict]:
         """爬 Amazon 搜索前 1 页: 标题/价格/评分/评论数/bought in past month/ASIN
-        
+
         Args:
             niche: 搜索关键词
             limit: 最大返回数量
             progress_callback: 可选的进度回调函数 (step, message) -> None
+            browser: 可选的共享浏览器实例; 传入则复用(调用方负责关闭), 不传则自建自关
         """
         products = []
         url = f"https://www.amazon.com/s?k={quote_plus(niche)}&page=1"
         max_retries = 3
         base_delay = 2  # seconds
-        
+
         for attempt in range(1, max_retries + 1):
             try:
                 if progress_callback:
                     progress_callback(1, f"尝试连接 Amazon (第 {attempt}/{max_retries} 次)...")
-                
-                async with async_playwright() as p:
-                    browser = await p.chromium.launch(headless=True, args=self._browser_launch_args())
-                    try:
-                        context, page = await self._new_amazon_context(browser)
-                        
-                        if progress_callback:
-                            progress_callback(1, f"加载搜索页面 (尝试 {attempt}/{max_retries})...")
-                        
-                        await page.goto(url, wait_until="domcontentloaded", timeout=45000)
 
-                        # 等待搜索结果容器
+                if browser is None:
+                    async with async_playwright() as p:
+                        browser = await p.chromium.launch(headless=True, args=self._browser_launch_args())
                         try:
-                            await page.wait_for_selector(
-                                '[data-component-type="s-search-result"], .s-result-item', timeout=20000
+                            products = await self._fetch_amazon_once(
+                                browser, url, niche, limit, attempt, max_retries, progress_callback
                             )
-                        except Exception as e:
-                            print(f"[Amazon] 等待结果容器超时: {e}")
-                            # 继续尝试解析
-
-                        # 搜索结果总数(REAL, Gate1 volume 代理)
-                        result_count = 0
-                        try:
-                            rc_el = await page.query_selector('span.a-color-state.a-text-bold')
-                            if rc_el:
-                                rc_text = (await rc_el.inner_text()).strip()
-                                m = re.search(r'([\d,]+(?:\.\d+)?[KMB]?)\s*results?', rc_text, re.I)
-                                if m:
-                                    result_count = self._parse_compact_number(m.group(1))
-                        except Exception:
-                            pass
-                        if not result_count:
-                            try:
-                                body_text = await page.inner_text('body')
-                                m = re.search(r'of\s+(?:over\s+)?([\d,]+(?:\.\d+)?[KMB]?)\s*results?', body_text, re.I)
-                                if m:
-                                    result_count = self._parse_compact_number(m.group(1))
-                            except Exception:
-                                pass
-
-                        items = await page.query_selector_all('[data-component-type="s-search-result"]')
-                        if not items:
-                            items = await page.query_selector_all('.s-result-item[data-asin]')
-
-                        if not items:
-                            print(f"[Amazon] 未找到商品项 (尝试 {attempt}/{max_retries})")
-                            if attempt < max_retries:
-                                await asyncio.sleep(2 ** attempt)  # exponential backoff
-                                continue
-                            break
-
-                        for item in items[:limit]:
-                            try:
-                                # 标题
-                                title = ""
-                                for sel in ['h2 a span', 'h2 .a-text-normal', '.a-size-base-plus', '.a-text-normal']:
-                                    title_el = await item.query_selector(sel)
-                                    if title_el:
-                                        title = (await title_el.inner_text()).strip()
-                                        if title:
-                                            break
-                                # 过滤徽章/广告文本
-                                if any(bad in title for bad in ("Amazon's Choice", "Overall Pick", "Sponsored", "Best Seller")):
-                                    title = ""
-                                    h2_el = await item.query_selector("h2")
-                                    if h2_el:
-                                        t2 = (await h2_el.inner_text()).strip()
-                                        if t2 and not any(bad in t2 for bad in ("Amazon's Choice", "Overall Pick", "Sponsored", "Best Seller")):
-                                            title = t2
-                                if not title:
-                                    continue
-
-                                # 价格
-                                price_usd = 0.0
-                                for sel in ['.a-price-whole', '.a-offscreen', '[data-a-color="price"] .a-offscreen']:
-                                    price_el = await item.query_selector(sel)
-                                    if price_el:
-                                        price_text = await price_el.inner_text()
-                                        price_usd = float(re.sub(r'[^\d.]', '', price_text)) if price_text else 0
-                                        if price_usd > 0:
-                                            break
-
-                                # 评分
-                                rating = 0.0
-                                rating_el = await item.query_selector('[aria-label*="stars"], [aria-label*="out of 5"]')
-                                if rating_el:
-                                    aria = await rating_el.get_attribute('aria-label') or ""
-                                    m = re.search(r'(\d+\.?\d*)', aria)
-                                    rating = float(m.group(1)) if m else 0
-
-                                # 评论数(REAL)
-                                reviews = 0
-                                for sel in ['span.s-underline-text', 'a[aria-label*="reviews"] span', '.a-size-base.s-underline-text']:
-                                    reviews_el = await item.query_selector(sel)
-                                    if reviews_el:
-                                        reviews_text = (await reviews_el.inner_text()).strip()
-                                        digits = re.sub(r'[^\d]', '', reviews_text)
-                                        reviews = int(digits) if digits else 0
-                                        if reviews > 0:
-                                            break
-
-                                # bought in past month 徽章(REAL 销售信号)
-                                bought_past_month = 0
-                                for sel in ['.a-size-base.a-color-secondary', '.a-row.a-size-base.a-color-secondary']:
-                                    badge_els = await item.query_selector_all(sel)
-                                    for b_el in badge_els:
-                                        text = (await b_el.inner_text()).strip()
-                                        m = re.search(r'([\d.,]+[KMB]?)\+?\s*bought in past month', text, re.I)
-                                        if m:
-                                            bought_past_month = self._parse_compact_number(m.group(1))
-                                            break
-                                    if bought_past_month:
-                                        break
-
-                                # 链接和 ASIN
-                                asin = ""
-                                link_el = await item.query_selector('h2 a, .a-link-normal[href*="/dp/"]')
-                                href = await link_el.get_attribute('href') if link_el else ""
-                                if href:
-                                    m = re.search(r'/dp/([A-Z0-9]{10})', href)
-                                    asin = m.group(1) if m else ""
-
-                                # 90 天销量
-                                est_sales_90d = bought_past_month * 3
-                                sales_method = "bought_in_past_month_x3" if bought_past_month else ""
-
-                                products.append({
-                                    "title": title,
-                                    "price_usd": price_usd,
-                                    "rating": rating,
-                                    "reviews": reviews,
-                                    "bought_in_past_month": bought_past_month,
-                                    "url": f"https://www.amazon.com/dp/{asin}" if asin else urljoin("https://www.amazon.com", href),
-                                    "asin": asin,
-                                    "source": "amazon",
-                                    "est_sales_90d": est_sales_90d,
-                                    "sales_method": sales_method,
-                                    "result_count": result_count,
-                                })
-                            except Exception as e:
-                                print(f"[Amazon] 解析单品失败: {e}")
-                                continue
-
-                        # 成功获取到产品，跳出重试循环
-                        if products:
-                            break
-                        elif attempt < max_retries:
-                            print(f"[Amazon] 未解析到有效产品，重试 ({attempt}/{max_retries})...")
-                            await asyncio.sleep(2 ** attempt)
-                            continue
-
-                    finally:
-                        await browser.close()
+                        finally:
+                            await browser.close()
+                        browser = None
+                else:
+                    products = await self._fetch_amazon_once(
+                        browser, url, niche, limit, attempt, max_retries, progress_callback
+                    )
+                if products:
+                    break
+                elif attempt < max_retries:
+                    print(f"[Amazon] 未解析到有效产品，重试 ({attempt}/{max_retries})...")
+                    await asyncio.sleep(2 ** attempt)
 
             except Exception as e:
                 print(f"[Amazon] 第 {attempt} 次尝试失败: {e}")
@@ -347,48 +237,207 @@ class PublicFetcher:
 
         return products
 
+    async def _fetch_amazon_once(self, browser, url: str, niche: str, limit: int,
+                                 attempt: int, max_retries: int, progress_callback=None) -> List[dict]:
+        """单次尝试: 加载搜索页并解析。返回产品列表(可能为空, 空则由调用方决定重试)。"""
+        products = []
+        context, page = await self._new_amazon_context(browser)
+        try:
+            if progress_callback:
+                progress_callback(1, f"加载搜索页面 (尝试 {attempt}/{max_retries} 次)...")
+
+            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+
+            # 等待搜索结果容器
+            try:
+                await page.wait_for_selector(
+                    '[data-component-type="s-search-result"], .s-result-item', timeout=20000
+                )
+            except Exception as e:
+                print(f"[Amazon] 等待结果容器超时: {e}")
+                # 继续尝试解析
+
+            # 搜索结果总数(REAL, Gate1 volume 代理)
+            result_count = 0
+            try:
+                rc_el = await page.query_selector('span.a-color-state.a-text-bold')
+                if rc_el:
+                    rc_text = (await rc_el.inner_text()).strip()
+                    m = re.search(r'([\d,]+(?:\.\d+)?[KMB]?)\s*results?', rc_text, re.I)
+                    if m:
+                        result_count = self._parse_compact_number(m.group(1))
+            except Exception:
+                pass
+            if not result_count:
+                try:
+                    body_text = await page.inner_text('body')
+                    m = re.search(r'of\s+(?:over\s+)?([\d,]+(?:\.\d+)?[KMB]?)\s*results?', body_text, re.I)
+                    if m:
+                        result_count = self._parse_compact_number(m.group(1))
+                except Exception:
+                    pass
+
+            items = await page.query_selector_all('[data-component-type="s-search-result"]')
+            if not items:
+                items = await page.query_selector_all('.s-result-item[data-asin]')
+
+            if not items:
+                print(f"[Amazon] 未找到商品项 (尝试 {attempt}/{max_retries})")
+                return products
+
+            for item in items[:limit]:
+                try:
+                    # 标题
+                    title = ""
+                    for sel in ['h2 a span', 'h2 .a-text-normal', '.a-size-base-plus', '.a-text-normal']:
+                        title_el = await item.query_selector(sel)
+                        if title_el:
+                            title = (await title_el.inner_text()).strip()
+                            if title:
+                                break
+                    # 过滤徽章/广告文本
+                    if any(bad in title for bad in ("Amazon's Choice", "Overall Pick", "Sponsored", "Best Seller")):
+                        title = ""
+                        h2_el = await item.query_selector("h2")
+                        if h2_el:
+                            t2 = (await h2_el.inner_text()).strip()
+                            if t2 and not any(bad in t2 for bad in ("Amazon's Choice", "Overall Pick", "Sponsored", "Best Seller")):
+                                title = t2
+                    if not title:
+                        continue
+
+                    # 价格
+                    price_usd = 0.0
+                    for sel in ['.a-price-whole', '.a-offscreen', '[data-a-color="price"] .a-offscreen']:
+                        price_el = await item.query_selector(sel)
+                        if price_el:
+                            price_text = await price_el.inner_text()
+                            price_usd = float(re.sub(r'[^\d.]', '', price_text)) if price_text else 0
+                            if price_usd > 0:
+                                break
+
+                    # 评分
+                    rating = 0.0
+                    rating_el = await item.query_selector('[aria-label*="stars"], [aria-label*="out of 5"]')
+                    if rating_el:
+                        aria = await rating_el.get_attribute('aria-label') or ""
+                        m = re.search(r'(\d+\.?\d*)', aria)
+                        rating = float(m.group(1)) if m else 0
+
+                    # 评论数(REAL)
+                    reviews = 0
+                    for sel in ['span.s-underline-text', 'a[aria-label*="reviews"] span', '.a-size-base.s-underline-text']:
+                        reviews_el = await item.query_selector(sel)
+                        if reviews_el:
+                            reviews_text = (await reviews_el.inner_text()).strip()
+                            digits = re.sub(r'[^\d]', '', reviews_text)
+                            reviews = int(digits) if digits else 0
+                            if reviews > 0:
+                                break
+
+                    # bought in past month 徽章(REAL 销售信号)
+                    bought_past_month = 0
+                    for sel in ['.a-size-base.a-color-secondary', '.a-row.a-size-base.a-color-secondary']:
+                        badge_els = await item.query_selector_all(sel)
+                        for b_el in badge_els:
+                            text = (await b_el.inner_text()).strip()
+                            m = re.search(r'([\d.,]+[KMB]?)\+?\s*bought in past month', text, re.I)
+                            if m:
+                                bought_past_month = self._parse_compact_number(m.group(1))
+                                break
+                        if bought_past_month:
+                            break
+
+                    # 链接和 ASIN
+                    asin = ""
+                    link_el = await item.query_selector('h2 a, .a-link-normal[href*="/dp/"]')
+                    href = await link_el.get_attribute('href') if link_el else ""
+                    if href:
+                        m = re.search(r'/dp/([A-Z0-9]{10})', href)
+                        asin = m.group(1) if m else ""
+
+                    # 90 天销量
+                    est_sales_90d = bought_past_month * 3
+                    sales_method = "bought_in_past_month_x3" if bought_past_month else ""
+
+                    products.append({
+                        "title": title,
+                        "price_usd": price_usd,
+                        "rating": rating,
+                        "reviews": reviews,
+                        "bought_past_month": bought_past_month,
+                        "url": f"https://www.amazon.com/dp/{asin}" if asin else urljoin("https://www.amazon.com", href),
+                        "asin": asin,
+                        "source": "amazon",
+                        "est_sales_90d": est_sales_90d,
+                        "sales_method": sales_method,
+                        "result_count": result_count,
+                    })
+                except Exception as e:
+                    print(f"[Amazon] 解析单品失败: {e}")
+                    continue
+        finally:
+            await context.close()
+
+        return products
+
     # ------------------------------------------------------------------
     # Amazon 详情页: BSR / Item Weight / Product Dimensions(REAL)
     # ------------------------------------------------------------------
-    async def _enrich_amazon_details(self, products: List[dict], max_details: int = 6) -> List[dict]:
-        """对前 max_details 个 ASIN 爬详情页, 补 BSR / 重量 / 尺寸"""
+    async def _enrich_amazon_details(self, products: List[dict], max_details: int = 6, browser=None) -> List[dict]:
+        """对前 max_details 个 ASIN 爬详情页, 补 BSR / 重量 / 尺寸
+
+        browser: 可选的共享浏览器实例; 传入则复用(调用方负责关闭), 不传则自建自关
+        """
         targets = [p for p in products if p.get("asin")][:max_details]
         if not targets:
             return products
 
         # 详情页并发但限速(Amazon 反爬敏感 + CPU 控制, 1 并发最稳)
         sem = asyncio.Semaphore(1)
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, args=self._browser_launch_args())
+
+        async def _run(browser) -> None:
             context, warmup_page = await self._new_amazon_context(browser)
-            await warmup_page.close()
+            try:
+                await warmup_page.close()
 
-            async def fetch_one(prod: dict):
-                async with sem:
-                    page = await context.new_page()
-                    try:
-                        await page.goto(prod["url"], wait_until="domcontentloaded", timeout=25000)
-                        await page.wait_for_timeout(1500)  # 给渲染留时间
+                async def fetch_one(prod: dict):
+                    async with sem:
+                        page = await context.new_page()
+                        try:
+                            await page.goto(prod["url"], wait_until="domcontentloaded", timeout=25000)
+                            await page.wait_for_timeout(1500)  # 给渲染留时间
 
-                        detail = await self._parse_detail_page(page)
-                        if detail.get("bsr"):
-                            prod["bsr"] = detail["bsr"]
-                            if not prod.get("est_sales_90d"):
-                                prod["est_sales_90d"] = estimate_sales_90d_from_bsr(detail["bsr"])
-                                prod["sales_method"] = "bsr_estimate"
-                        if detail.get("weight_g"):
-                            prod["weight_g"] = detail["weight_g"]
-                        if detail.get("dimensions_cm"):
-                            prod["dimensions_cm"] = detail["dimensions_cm"]
-                    except Exception as e:
-                        print(f"[Amazon detail] {prod.get('asin')} failed: {e}")
-                    finally:
-                        await page.close()
-                    # 限速: 每次请求间隔
-                    await asyncio.sleep(2)
+                            detail = await self._parse_detail_page(page)
+                            if detail.get("bsr"):
+                                prod["bsr"] = detail["bsr"]
+                                if not prod.get("est_sales_90d"):
+                                    prod["est_sales_90d"] = estimate_sales_90d_from_bsr(detail["bsr"])
+                                    prod["sales_method"] = "bsr_estimate"
+                            if detail.get("weight_g"):
+                                prod["weight_g"] = detail["weight_g"]
+                            if detail.get("dimensions_cm"):
+                                prod["dimensions_cm"] = detail["dimensions_cm"]
+                        except Exception as e:
+                            print(f"[Amazon detail] {prod.get('asin')} failed: {e}")
+                        finally:
+                            await page.close()
+                        # 限速: 每次请求间隔
+                        await asyncio.sleep(2)
 
-            await asyncio.gather(*[fetch_one(t) for t in targets])
-            await browser.close()
+                await asyncio.gather(*[fetch_one(t) for t in targets])
+            finally:
+                await context.close()
+
+        if browser is not None:
+            await _run(browser)
+        else:
+            async with async_playwright() as p:
+                own_browser = await p.chromium.launch(headless=True, args=self._browser_launch_args())
+                try:
+                    await _run(own_browser)
+                finally:
+                    await own_browser.close()
 
         return products
 

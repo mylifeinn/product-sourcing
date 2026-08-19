@@ -15,8 +15,16 @@ mkdir -p logs
 STAMP=$(date '+%Y-%m-%d %H:%M:%S')
 echo "=== [$STAMP] 开始每日选品 (limit=$LIMIT) ==="
 
-# 全量抓取 + 评分 + 去重 + 落库(带 CPU 限流)
-.venv/bin/python -m sourcing fetch-all --limit "$LIMIT" --sleep 15
+# 全量抓取 + 评分 + 去重 + 落库
+# systemd-run 硬限制: CPU 最多 60% 单核、内存 550M 顶, 防止爬虫挤占其它服务
+# (机器上还有 caddy/filebrowser 等在跑, 且厂商限制长时间高 CPU)
+CRAWL="systemd-run --scope --quiet \
+  --property=CPUQuota=60% \
+  --property=CPUWeight=20 \
+  --property=MemoryHigh=400M \
+  --property=MemoryMax=550M"
+
+$CRAWL .venv/bin/python -m sourcing fetch-all --limit "$LIMIT" --sleep 15
 
 # Notion 清空 + ASIN 去重 + 全量同步(序号按 score 降序)
 echo "[$STAMP] 同步 Notion (清空+去重)..."
